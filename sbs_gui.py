@@ -13,6 +13,33 @@ from dataclasses import dataclass
 from typing import List
 
 
+def find_oiiotool() -> str | None:
+    """Search common locations and PATH for ``oiiotool``.
+
+    Returns the full path to the executable or ``None`` if not found.
+    """
+    for name in ("oiiotool", "oiiotool.exe"):
+        exe = shutil.which(name)
+        if exe:
+            return exe
+
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
+    local = os.path.join(base_dir, "oiiotool.exe")
+    if os.path.exists(local):
+        return local
+
+    program_files = os.environ.get("PROGRAMFILES", "")
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)", "")
+    candidates = [
+        os.path.join(program_files, "OpenImageIO", "bin", "oiiotool.exe"),
+        os.path.join(program_files_x86, "OpenImageIO", "bin", "oiiotool.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
 @dataclass
 class Shot:
     name: str
@@ -49,24 +76,13 @@ class ConverterGUI(tk.Tk):
         self.shots: List[Shot] = []
         self.shot_vars: List[tk.BooleanVar] = []
         self.queue: queue.Queue = queue.Queue()
-        self.oiiotool = self._find_oiiotool()
+        self.oiiotool = find_oiiotool()
         self.thumbnail: tk.PhotoImage | None = None
         self.current_frame: str = ""
         self._build_widgets()
         self.after(100, self.process_queue)
 
     # UI -----------------------------------------------------------------
-    def _find_oiiotool(self) -> str:
-        exe = shutil.which("oiiotool")
-        if exe:
-            return exe
-        local = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(__file__)), "oiiotool")
-        if os.path.exists(local):
-            return local
-        messagebox.showerror("Missing dependency", "oiiotool executable not found.\nPlease install OpenImageIO or bundle oiiotool next to this app.")
-        self.destroy()
-        raise SystemExit
-
     def _build_widgets(self) -> None:
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=10, pady=5)
@@ -147,10 +163,22 @@ class ConverterGUI(tk.Tk):
         if not selected:
             messagebox.showinfo("Nothing to convert", "No shots selected.")
             return
+        oiiotool = find_oiiotool()
+        if not oiiotool:
+            messagebox.showerror(
+                "Missing dependency",
+                "Could not find oiiotool executable.\nPlease install OpenImageIO tools.",
+            )
+            return
+        self.oiiotool = oiiotool
         self.convert_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self._convert_worker, args=(selected,), daemon=True).start()
+        threading.Thread(
+            target=self._convert_worker,
+            args=(selected, oiiotool),
+            daemon=True,
+        ).start()
 
-    def _convert_worker(self, shots: List[Shot]) -> None:
+    def _convert_worker(self, shots: List[Shot], oiiotool: str) -> None:
         total_frames = sum(self._frame_count(s.path) for s in shots)
         done = 0
         self.queue.put(("overall", done, total_frames))
@@ -162,9 +190,30 @@ class ConverterGUI(tk.Tk):
             for idx, frame in enumerate(frames, 1):
                 src = os.path.join(shot.path, frame)
                 dst = os.path.join(outdir, frame.replace(".exr", "_SBS.exr"))
-                cmd = [self.oiiotool, src, "--fullpixels", "-d", self.datatype.get(),
-                       "--compression", self.compression.get(), "-o", dst]
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                cmd = [
+                    oiiotool,
+                    src,
+                    "--fullpixels",
+                    "-d",
+                    self.datatype.get(),
+                    "--compression",
+                    self.compression.get(),
+                    "-o",
+                    dst,
+                ]
+                try:
+                    result = subprocess.run(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                    )
+                except FileNotFoundError:
+                    self.queue.put(
+                        (
+                            "log",
+                            "oiiotool executable not found. Please install OpenImageIO tools.",
+                        )
+                    )
+                    self.queue.put(("done",))
+                    return
                 if result.returncode != 0:
                     self.queue.put(("log", f"{shot.name}: {frame} failed - {result.stderr.strip()}"))
                 else:
@@ -211,8 +260,17 @@ class ConverterGUI(tk.Tk):
             return None
 
     def _get_channels(self, frame: str) -> List[str]:
-        result = subprocess.run([self.oiiotool, frame, "--info", "-v"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if not self.oiiotool:
+            return []
+        try:
+            result = subprocess.run(
+                [self.oiiotool, frame, "--info", "-v"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            return []
         for line in result.stdout.splitlines():
             if "channel list:" in line:
                 return [c.strip() for c in line.split("channel list:", 1)[1].split(",")]
@@ -238,14 +296,40 @@ class ConverterGUI(tk.Tk):
 
     # Single frame -------------------------------------------------------
     def convert_single(self) -> None:
-        file = filedialog.askopenfilename(title="Select EXR frame",
-                                          filetypes=[("OpenEXR", "*.exr")])
+        file = filedialog.askopenfilename(
+            title="Select EXR frame", filetypes=[("OpenEXR", "*.exr")]
+        )
         if not file:
             return
+        oiiotool = find_oiiotool()
+        if not oiiotool:
+            messagebox.showerror(
+                "Missing dependency",
+                "Could not find oiiotool executable.\nPlease install OpenImageIO tools.",
+            )
+            return
         out = file.replace(".exr", "_SBS.exr")
-        cmd = [self.oiiotool, file, "--fullpixels", "-d", self.datatype.get(),
-               "--compression", self.compression.get(), "-o", out]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        cmd = [
+            oiiotool,
+            file,
+            "--fullpixels",
+            "-d",
+            self.datatype.get(),
+            "--compression",
+            self.compression.get(),
+            "-o",
+            out,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+        except FileNotFoundError:
+            messagebox.showerror(
+                "Conversion failed",
+                "oiiotool executable not found. Please install OpenImageIO tools.",
+            )
+            return
         if result.returncode != 0:
             messagebox.showerror("Conversion failed", result.stderr.strip())
         else:
