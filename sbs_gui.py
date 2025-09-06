@@ -28,6 +28,13 @@ def find_oiiotool() -> str | None:
     if os.path.exists(local):
         return local
 
+    # Search vcpkg installation directory
+    vcpkg_path = os.path.join(os.path.expanduser("~"), "vcpkg", "installed")
+    if os.path.exists(vcpkg_path):
+        for root, dirs, files in os.walk(vcpkg_path):
+            if "oiiotool.exe" in files:
+                return os.path.join(root, "oiiotool.exe")
+
     program_files = os.environ.get("PROGRAMFILES", "")
     program_files_x86 = os.environ.get("PROGRAMFILES(X86)", "")
     candidates = [
