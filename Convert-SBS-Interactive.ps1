@@ -23,6 +23,27 @@ $ErrorActionPreference = 'Stop'
 
 function Die([string]$msg){ Write-Error $msg; exit 1 }
 
+function Wait-UnlockedAndReplace {
+  param(
+    [Parameter(Mandatory)][string]$TempPath,
+    [Parameter(Mandatory)][string]$FinalPath,
+    [int]$TimeoutSeconds = 30
+  )
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      if (Test-Path -LiteralPath $FinalPath) {
+        Remove-Item -LiteralPath $FinalPath -Force
+      }
+      Move-Item -LiteralPath $TempPath -Destination $FinalPath -Force
+      return $true
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  return $false
+}
+
 # Locate oiiotool
 $OiiotoolPath = $null
 try {
@@ -106,8 +127,9 @@ for ($s=0; $s -lt $totShots; $s++) {
     $dstDir = if ($relDir -and -not $InPlace) { Join-Path $destRoot $relDir } else { Split-Path $src -Parent }
     if (-not $InPlace) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
 
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($src)
-    $dst  = if ($InPlace) { Join-Path $dstDir ($base + "_SBS.tmp.exr") } else { Join-Path $dstDir ($base + "_SBS.exr") }
+    $base   = [System.IO.Path]::GetFileNameWithoutExtension($src)
+    $dstNew = Join-Path $dstDir ($base + "_SBS.NEW.exr")
+    $dst    = if ($InPlace) { Join-Path $dstDir ($base + ".exr") } else { Join-Path $dstDir ($base + "_SBS.exr") }
 
     # Progress bars
     $overallPct = [int](100*$s/$totShots)
@@ -117,33 +139,36 @@ for ($s=0; $s -lt $totShots; $s++) {
 
     # Build args and run
     $args = @($src) + (if ($FirstSubimage) { @('--subimage','0') } else { @('-a') }) + @('--fullpixels','-d',$DataType) + $compArgs + @('-o',$dst)
+
     & $OiiotoolPath @args
     if ($LASTEXITCODE -eq 0) {
       if ($InPlace) {
-        # Atomically swap: backup original, then replace
+        # Backup original before replacement
         $bak = Join-Path $dstDir ($base + ".orig.exr")
         try {
-          # rename original to .orig.exr (only once)
           if (-not (Test-Path -LiteralPath $bak)) {
             Rename-Item -LiteralPath $src -NewName ([System.IO.Path]::GetFileName($bak))
           } else {
             Remove-Item -LiteralPath $src -Force
           }
-          # move temp to original name (drop _SBS suffix)
-          $final = Join-Path $dstDir ($base + ".exr")
-          Move-Item -LiteralPath $dst -Destination $final -Force
         } catch {
           Write-Warning "InPlace swap failed for $src : $($_.Exception.Message)"
           $fail++; $grandFail++
-          if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -ErrorAction SilentlyContinue }
+          if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
           continue
         }
       }
-      $ok++; $grandOK++
-      if (-not $Quiet) { Write-Host " OK -> $dst" }
+
+      if (Wait-UnlockedAndReplace -TempPath $dstNew -FinalPath $dst) {
+        $ok++; $grandOK++
+        if (-not $Quiet) { Write-Host " OK -> $dst" }
+      } else {
+        Write-Warning "Could not replace $dst (locked?); left $dstNew"
+        $fail++; $grandFail++
+      }
     } else {
       $fail++; $grandFail++
-      if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -ErrorAction SilentlyContinue }
+      if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
       if (-not $Quiet) { Write-Warning " FAIL ($LASTEXITCODE) -> $src" }
     }
   }
