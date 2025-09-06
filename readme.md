@@ -27,6 +27,7 @@ Unreal’s \*\*Panoramic Render Pass\*\* can output stereoscopic panoramas where
 \* Lets you pick \*\*compression\*\* (`dwab`/`dwaa`/`zip`/`none`) and \*\*pixel data type\*\* (`float` or `half`).
 
 \* Optional \*\*in-place\*\* mode: replaces originals safely (backs up as `.orig.exr`).
+\* Tolerates Dropbox/OneDrive file locks; leaves a `.NEW.exr` if replacement fails.
 
 
 
