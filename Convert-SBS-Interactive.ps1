@@ -15,6 +15,7 @@ param(
   [string]$DataType = "float",
   [switch]$Recurse,        # include subfolders
   [switch]$InPlace,        # overwrite originals (writes temp, then swaps)
+    [switch]$FirstSubimage,  # legacy: only subimage 0
   [switch]$Quiet           # less console chatter
 )
 
@@ -137,7 +138,8 @@ for ($s=0; $s -lt $totShots; $s++) {
     Write-Progress -Id 2 -ParentId 1 -Activity "Converting frames" -Status "$($i+1)/$total  $($f.Name)" -PercentComplete $filePct
 
     # Build args and run
-    $args = @($src,'--subimage','0','--fullpixels','-d',$DataType) + $compArgs + @('-o',$dstNew)
+    $args = @($src) + (if ($FirstSubimage) { @('--subimage','0') } else { @('-a') }) + @('--fullpixels','-d',$DataType) + $compArgs + @('-o',$dst)
+
     & $OiiotoolPath @args
     if ($LASTEXITCODE -eq 0) {
       if ($InPlace) {

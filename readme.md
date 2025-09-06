@@ -20,7 +20,7 @@ Unreal’s \*\*Panoramic Render Pass\*\* can output stereoscopic panoramas where
 
 \* Reads your EXR frames and writes a \*\*fixed\*\* EXR where `displayWindow == dataWindow` using `--fullpixels`.
 
-\* Copies \*\*subimage 0\*\* (the main “FinalImage”) and outputs a single SBS frame per input.
+\* Copies \*\*all subimages\*\* (depth, lighting, etc.) by default. Use `-FirstSubimage` to keep only the first pass.
 
 \* Writes results into \*\*sibling\*\* folders named `<Shot>\_SBS`, mirroring any subfolders.
 
@@ -251,7 +251,7 @@ Get-ChildItem -LiteralPath $in -Filter \*.exr | ForEach-Object {
 
 &nbsp; $dst = Join-Path $out ($\_.BaseName + "\_SBS.exr")
 
-&nbsp; \& $oiio $\_.FullName --subimage 0 --fullpixels -d float --compression dwab:45 -o $dst
+&nbsp; \& $oiio $\_.FullName -a --fullpixels -d float --compression dwab:45 -o $dst
 
 &nbsp; if ($LASTEXITCODE -ne 0) { Write-Warning "FAILED -> $($\_.FullName)" }
 
@@ -269,7 +269,7 @@ Get-ChildItem -LiteralPath $in -Filter \*.exr | ForEach-Object {
 
 
 
-\* Output EXR: \*\*single subimage\*\*, SBS visible everywhere
+\* Output EXR: \*\*all subimages retained\*\*, SBS visible everywhere
 
 \* The file name: `<OriginalBase>\_SBS.exr`
 
@@ -281,7 +281,7 @@ Get-ChildItem -LiteralPath $in -Filter \*.exr | ForEach-Object {
 
 
 
-\*\*Note:\*\* We intentionally only copy \*\*subimage 0\*\* (“FinalImage”). Additional parts/passes (e.g., depth, detail lighting) are not preserved in the fixed SBS outputs — by design for editorial review/dailies. If you need other parts, we can add a switch to include them.
+\*\*Note:\*\* By default all subimages (e.g., depth, detail lighting) are preserved. Use `-FirstSubimage` for legacy single-pass output.
 
 
 
@@ -389,7 +389,7 @@ A: Not safely/portably. EXR’s full/data windows affect image layout. We fix it
 
 \*\*Q: Can I preserve all subimages (depth, lighting, etc.)?\*\*
 
-A: This tool targets editorial SBS. We currently extract \*\*subimage 0\*\*. We can extend the script to copy specific subimages or re-emit a multi-part file if you need that.
+A: Yes, all subimages are preserved. Use `-FirstSubimage` to emit only the first pass if needed.
 
 
 
