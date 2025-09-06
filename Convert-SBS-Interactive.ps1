@@ -1,51 +1,60 @@
-# Convert-SBS-Interactive.ps1
-# Pick one or more shot folders, convert EXR sequences to true SBS into <shot>_SBS folders,
-# showing progress bars. Uses oiiotool (OpenImageIO).
+# Convert-SBS-CLI.ps1
+# CLI-only. Paste or pass shot folders. Converts to SBS into <shot>_SBS folders (or -InPlace).
+# Shows overall + per-shot progress bars. Uses OpenImageIO oiiotool.
 
 [CmdletBinding()]
 param(
-  # If you want to skip the folder picker, you can pass paths here:
+  # Pass one or more folders, or leave empty to paste them interactively
   [string[]]$InputDirs,
 
   # Options
-  [ValidateSet("zip","dwaa","dwab","none")] [string]$Compression = "dwab",
+  [ValidateSet("zip","dwaa","dwab","none")]
+  [string]$Compression = "dwab",
   [int]$DwaLevel = 45,
-  [ValidateSet("float","half")] [string]$DataType = "float",
-  [switch]$Recurse
+  [ValidateSet("float","half")]
+  [string]$DataType = "float",
+  [switch]$Recurse,        # include subfolders
+  [switch]$InPlace,        # overwrite originals (writes temp, then swaps)
+  [switch]$Quiet           # less console chatter
 )
 
-function Die($msg){ Write-Error $msg; exit 1 }
+$ErrorActionPreference = 'Stop'
 
-# Find oiiotool automatically (vcpkg)
+function Die([string]$msg){ Write-Error $msg; exit 1 }
+
+# Locate oiiotool
 $OiiotoolPath = $null
-$guess = Join-Path $env:USERPROFILE "vcpkg\installed"
-$found = Get-ChildItem -Path $guess -Recurse -Filter oiiotool.exe -ErrorAction SilentlyContinue |
-         Select-Object -First 1 -ExpandProperty FullName
-if ($found) { $OiiotoolPath = $found }
+try {
+  $guess = Join-Path $env:USERPROFILE 'vcpkg\installed'
+  $found = Get-ChildItem -Path $guess -Recurse -Filter oiiotool.exe -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+  if ($found) { $OiiotoolPath = $found }
+} catch {}
 if (-not $OiiotoolPath -or -not (Test-Path -LiteralPath $OiiotoolPath)) {
-  Die "oiiotool.exe not found. Install via: `.\vcpkg install openimageio[tools] --recurse`"
+  Die "oiiotool.exe not found. Install via: .\vcpkg install openimageio[tools] --recurse"
 }
+if (-not $Quiet) { Write-Host "Using oiiotool: $OiiotoolPath" }
 
-# If no input dirs passed, open a folder picker repeatedly to gather multiple shots
+# Gather inputs (no GUI)
 if (-not $InputDirs -or $InputDirs.Count -eq 0) {
-  Add-Type -AssemblyName System.Windows.Forms
-  $folders = @()
+  Write-Host "Paste one or more SHOT folder paths. Press Enter on a blank line to finish."
+  $lines = @()
   while ($true) {
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Pick a SHOT folder to convert (click Cancel when finished selecting)"
-    $dlg.ShowNewFolderButton = $false
-    $res = $dlg.ShowDialog()
-    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { break }
-    if ($dlg.SelectedPath) { $folders += $dlg.SelectedPath }
+    $p = Read-Host "Path"
+    if ([string]::IsNullOrWhiteSpace($p)) { break }
+    $lines += $p
   }
-  if ($folders.Count -eq 0) { Die "No folders selected." }
-  $InputDirs = $folders
+  if (-not $lines) { Die "No folders provided." }
+  $InputDirs = $lines
 }
 
-# Normalize and validate
+# Normalize & validate
 $Shots = @()
 foreach ($p in $InputDirs) {
-  if (-not (Test-Path -LiteralPath $p)) { Write-Warning "Skip (not found): $p"; continue }
+  if (-not (Test-Path -LiteralPath $p)) {
+    Write-Warning "Skip (not found): $p"
+    continue
+  }
   $Shots += (Resolve-Path -LiteralPath $p).Path
 }
 if ($Shots.Count -eq 0) { Die "No valid shot folders." }
@@ -53,28 +62,98 @@ if ($Shots.Count -eq 0) { Die "No valid shot folders." }
 # Build compression args once
 $compArgs = @()
 switch ($Compression) {
-  "zip"  { $compArgs = @("--compression","zip") }
-  "none" { $compArgs = @("--compression","none") }
-  "dwaa" { $compArgs = @("--compression","dwaa:$DwaLevel") }
-  "dwab" { $compArgs = @("--compression","dwab:$DwaLevel") }
+  'zip'  { $compArgs = @('--compression','zip') }
+  'none' { $compArgs = @('--compression','none') }
+  'dwaa' { $compArgs = @('--compression',"dwaa:$DwaLevel") }
+  'dwab' { $compArgs = @('--compression',"dwab:$DwaLevel") }
 }
 
 $totShots = $Shots.Count
-$shotIdx  = 0
 $grandOK = 0; $grandFail = 0
 
-foreach ($shotPath in $Shots) {
-  $shotIdx++
-  $shotName  = Split-Path $shotPath -Leaf
-  $parent    = Split-Path $shotPath -Parent
-  $destRoot  = Join-Path $parent ($shotName + "_SBS")
-  New-Item -ItemType Directory -Force -Path $destRoot | Out-Null
+for ($s=0; $s -lt $totShots; $s++) {
+  $shotPath = $Shots[$s]
+  $shotName = Split-Path $shotPath -Leaf
+  $parent   = Split-Path $shotPath -Parent
+  $destRoot = if ($InPlace) { $shotPath } else { Join-Path $parent ($shotName + '_SBS') }
+  if (-not $InPlace) { New-Item -ItemType Directory -Force -Path $destRoot | Out-Null }
 
-  # Gather EXRs (optionally recurse), and skip anything already inside *_SBS
-  $gci = @{ Path=$shotPath; Filter="*.exr"; File=$true; ErrorAction="SilentlyContinue" }
+  # Collect EXRs (optionally recurse); if not InPlace, skip any already inside *_SBS
+  $gci = @{ Path=$shotPath; Filter='*.exr'; File=$true; ErrorAction='SilentlyContinue' }
   if ($Recurse) { $gci.Recurse = $true }
-  $frames = Get-ChildItem @gci | Where-Object { $_.DirectoryName -notmatch '\\[^\\]*_SBS(\\|$)' } | Sort-Object FullName
+  $frames = Get-ChildItem @gci | Sort-Object FullName
+  if (-not $InPlace) {
+    $frames = $frames | Where-Object { $_.DirectoryName -notmatch '\\[^\\]*_SBS(\\|$)' }
+  }
 
   $total = $frames.Count
   if ($total -eq 0) {
-    Write-Progress -Id 1 -Activity "Shots" -Status "[$shotId]()
+    Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName (no EXRs)" -PercentComplete ([int](100*($s+1)/$totShots))
+    continue
+  }
+
+  $ok=0; $fail=0
+  $shotRoot = (Resolve-Path -LiteralPath $shotPath).Path
+
+  for ($i=0; $i -lt $total; $i++) {
+    $f = $frames[$i]
+    $src = (Resolve-Path -LiteralPath $f.FullName).Path
+
+    # Mirror subfolders (even for InPlace we write to same folder)
+    $rel    = $src.Substring($shotRoot.Length).TrimStart('\')
+    $relDir = Split-Path $rel -Parent
+    $dstDir = if ($relDir -and -not $InPlace) { Join-Path $destRoot $relDir } else { Split-Path $src -Parent }
+    if (-not $InPlace) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($src)
+    $dst  = if ($InPlace) { Join-Path $dstDir ($base + "_SBS.tmp.exr") } else { Join-Path $dstDir ($base + "_SBS.exr") }
+
+    # Progress bars
+    $overallPct = [int](100*$s/$totShots)
+    Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName" -PercentComplete $overallPct
+    $filePct = [int](100*$i/$total)
+    Write-Progress -Id 2 -ParentId 1 -Activity "Converting frames" -Status "$($i+1)/$total  $($f.Name)" -PercentComplete $filePct
+
+    # Build args and run
+    $args = @($src,'--subimage','0','--fullpixels','-d',$DataType) + $compArgs + @('-o',$dst)
+    & $OiiotoolPath @args
+    if ($LASTEXITCODE -eq 0) {
+      if ($InPlace) {
+        # Atomically swap: backup original, then replace
+        $bak = Join-Path $dstDir ($base + ".orig.exr")
+        try {
+          # rename original to .orig.exr (only once)
+          if (-not (Test-Path -LiteralPath $bak)) {
+            Rename-Item -LiteralPath $src -NewName ([System.IO.Path]::GetFileName($bak))
+          } else {
+            Remove-Item -LiteralPath $src -Force
+          }
+          # move temp to original name (drop _SBS suffix)
+          $final = Join-Path $dstDir ($base + ".exr")
+          Move-Item -LiteralPath $dst -Destination $final -Force
+        } catch {
+          Write-Warning "InPlace swap failed for $src : $($_.Exception.Message)"
+          $fail++; $grandFail++
+          if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -ErrorAction SilentlyContinue }
+          continue
+        }
+      }
+      $ok++; $grandOK++
+      if (-not $Quiet) { Write-Host " OK -> $dst" }
+    } else {
+      $fail++; $grandFail++
+      if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -ErrorAction SilentlyContinue }
+      if (-not $Quiet) { Write-Warning " FAIL ($LASTEXITCODE) -> $src" }
+    }
+  }
+
+  Write-Progress -Id 2 -ParentId 1 -Completed
+  $overallPctDone = [int](100*($s+1)/$totShots)
+  Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName done — OK:$ok Fail:$fail  ->  $destRoot" -PercentComplete $overallPctDone
+}
+
+Write-Progress -Id 1 -Completed
+Write-Host "ALL DONE. Shots: $totShots   Converted: $grandOK   Failed: $grandFail"
+if ($InPlace) {
+  Write-Host "In-place mode used. Original files were backed up as *.orig.exr in the same folders."
+}
