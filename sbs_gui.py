@@ -1,3 +1,5 @@
+"""Tkinter-based tool for converting EXR sequences to SBS."""
+
 import os
 import subprocess
 import threading
