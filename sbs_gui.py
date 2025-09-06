@@ -89,6 +89,8 @@ class Shot:
     has_sbs: bool
     frames: int
     sbs_frames: int
+    needs_conversion: bool
+    conversion_progress: float  # 0.0 to 1.0
 
 
 def frame_count(path: str) -> int:
@@ -117,7 +119,12 @@ def scan_shots(root: str) -> List[Shot]:
             sbs_frames = len([f for f in os.listdir(shot_path)
                               if f.lower().endswith(".exr") and "_SBS" in f])
             has_sbs = sbs_frames > 0
-        shots.append(Shot(entry.name, shot_path, has_sbs, frames, sbs_frames))
+        
+        # Calculate conversion progress
+        needs_conversion = frames > sbs_frames
+        conversion_progress = sbs_frames / frames if frames > 0 else 0.0
+        
+        shots.append(Shot(entry.name, shot_path, not needs_conversion, frames, sbs_frames, needs_conversion, conversion_progress))
     return shots
 
 
@@ -140,6 +147,7 @@ class ConverterGUI(tk.Tk):
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(top, text="Select Shots Folder", command=self.load_folder).pack(side=tk.LEFT)
+        ttk.Button(top, text="🔄 Refresh", command=self.refresh_folder).pack(side=tk.LEFT, padx=5)
 
         opts = ttk.Frame(self)
         opts.pack(fill=tk.X, padx=10, pady=5)
@@ -210,26 +218,56 @@ class ConverterGUI(tk.Tk):
         folder = filedialog.askdirectory(title="Select Shots Folder")
         if not folder:
             return
+        self.load_folder_from_path(folder)
+
+    def refresh_folder(self) -> None:
+        """Refresh the current folder to update conversion status."""
+        if not hasattr(self, 'current_folder') or not self.current_folder:
+            messagebox.showinfo("No folder selected", "Please select a folder first.")
+            return
+        self.load_folder_from_path(self.current_folder)
+
+    def load_folder_from_path(self, folder: str) -> None:
+        """Load folder from a specific path (used by refresh)."""
+        self.current_folder = folder
         self.shots = scan_shots(folder)
         for child in self.shots_inner.winfo_children():
             child.destroy()
         self.shots_canvas.yview_moveto(0)
         self.shot_vars = []
         for shot in self.shots:
-            var = tk.BooleanVar(value=not shot.has_sbs)
-            label = f"{shot.name} (src {shot.frames}, sbs {shot.sbs_frames})"
+            var = tk.BooleanVar(value=shot.needs_conversion)
+            
+            # Create detailed status label
+            if shot.frames == 0:
+                status = "No EXR files"
+                color = "gray"
+            elif shot.conversion_progress == 1.0:
+                status = "✅ Complete"
+                color = "green"
+            elif shot.conversion_progress > 0:
+                status = f"🔄 {shot.sbs_frames}/{shot.frames} ({shot.conversion_progress:.0%})"
+                color = "orange"
+            else:
+                status = "⏳ Not started"
+                color = "red"
+            
+            label = f"{shot.name} - {status}"
             cb = ttk.Checkbutton(self.shots_inner, text=label, variable=var,
                                  command=lambda s=shot: self.update_preview(s))
-            if shot.has_sbs:
+            
+            # Only enable checkbox if conversion is needed
+            if not shot.needs_conversion:
                 cb.state(["disabled"])
-            cb.pack(anchor=tk.W)
+            
+            cb.pack(anchor=tk.W, pady=2)
             self.shot_vars.append(var)
         if self.shots:
             self.update_preview(self.shots[0])
 
     def select_all(self) -> None:
         for var, shot in zip(self.shot_vars, self.shots):
-            if not shot.has_sbs:
+            if shot.needs_conversion:
                 var.set(True)
 
     def deselect_all(self) -> None:
@@ -238,9 +276,9 @@ class ConverterGUI(tk.Tk):
 
     # Conversion ---------------------------------------------------------
     def start_convert(self) -> None:
-        selected = [s for s, v in zip(self.shots, self.shot_vars) if v.get() and not s.has_sbs]
+        selected = [s for s, v in zip(self.shots, self.shot_vars) if v.get() and s.needs_conversion]
         if not selected:
-            messagebox.showinfo("Nothing to convert", "No shots selected.")
+            messagebox.showinfo("Nothing to convert", "No shots selected for conversion.")
             return
         oiiotool = find_oiiotool()
         if not oiiotool:
@@ -261,11 +299,19 @@ class ConverterGUI(tk.Tk):
         total_frames = sum(self._frame_count(s.path) for s in shots)
         done = 0
         self.queue.put(("overall", done, total_frames))
+        
         for shot in shots:
             frames = self._frame_list(shot.path)
+            if not frames:
+                self.queue.put(("log", f"{shot.name}: No frames to convert (already complete?)"))
+                continue
+                
             self.queue.put(("shot", shot.name, 0, len(frames)))
+            self.queue.put(("log", f"{shot.name}: Converting {len(frames)} frames..."))
+            
             outdir = f"{shot.path}_SBS"
             os.makedirs(outdir, exist_ok=True)
+            
             for idx, frame in enumerate(frames, 1):
                 src = os.path.join(shot.path, frame)
                 dst = os.path.join(outdir, frame.replace(".exr", "_SBS.exr"))
@@ -296,17 +342,31 @@ class ConverterGUI(tk.Tk):
                 if result.returncode != 0:
                     self.queue.put(("log", f"{shot.name}: {frame} failed - {result.stderr.strip()}"))
                 else:
-                    self.queue.put(("log", f"{shot.name}: {frame}"))
+                    self.queue.put(("log", f"{shot.name}: {frame} ✅"))
                 done += 1
                 self.queue.put(("shot", shot.name, idx, len(frames)))
                 self.queue.put(("overall", done, total_frames))
-            self.queue.put(("log", f"Finished {shot.name}"))
-        self.queue.put(("log", "All conversions complete."))
+            self.queue.put(("log", f"✅ Finished {shot.name}"))
+        self.queue.put(("log", "🎉 All conversions complete!"))
         self.queue.put(("done",))
 
     def _frame_list(self, path: str) -> List[str]:
-        return [f for f in sorted(os.listdir(path))
-                if f.lower().endswith(".exr") and "_SBS" not in f]
+        """Get list of frames that need conversion (skip already converted ones)."""
+        source_frames = [f for f in sorted(os.listdir(path))
+                        if f.lower().endswith(".exr") and "_SBS" not in f]
+        
+        # Check which ones are already converted
+        sbs_path = f"{path}_SBS"
+        if os.path.exists(sbs_path):
+            try:
+                existing_sbs = set(os.listdir(sbs_path))
+                # Filter out frames that already have SBS versions
+                source_frames = [f for f in source_frames 
+                                if f.replace(".exr", "_SBS.exr") not in existing_sbs]
+            except (OSError, FileNotFoundError):
+                pass  # If we can't read the SBS directory, convert all frames
+        
+        return source_frames
 
     def _frame_count(self, path: str) -> int:
         return len(self._frame_list(path))

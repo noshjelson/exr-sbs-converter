@@ -106,13 +106,26 @@ for ($s=0; $s -lt $totShots; $s++) {
   $frames = Get-ChildItem @gci | Sort-Object FullName
   if (-not $InPlace) {
     $frames = $frames | Where-Object { $_.DirectoryName -notmatch '\\[^\\]*_SBS(\\|$)' }
+    
+    # Skip frames that are already converted (resume functionality)
+    if (Test-Path -LiteralPath $destRoot) {
+      $existingSbs = Get-ChildItem -Path $destRoot -Filter "*.exr" -ErrorAction SilentlyContinue | 
+        ForEach-Object { $_.Name }
+      $frames = $frames | Where-Object { 
+        $sbsName = $_.BaseName + "_SBS.exr"
+        $sbsName -notin $existingSbs
+      }
+    }
   }
 
   $total = $frames.Count
   if ($total -eq 0) {
-    Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName (no EXRs)" -PercentComplete ([int](100*($s+1)/$totShots))
+    Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName (no EXRs to convert)" -PercentComplete ([int](100*($s+1)/$totShots))
+    if (-not $Quiet) { Write-Host "  $shotName: No frames to convert (already complete?)" }
     continue
   }
+  
+  if (-not $Quiet) { Write-Host "  $shotName: Converting $total frames..." }
 
   $ok=0; $fail=0
   $shotRoot = (Resolve-Path -LiteralPath $shotPath).Path
