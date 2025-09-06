@@ -101,6 +101,15 @@ def frame_count(path: str) -> int:
         return 0
 
 
+def sbs_frame_count(path: str) -> int:
+    """Count SBS EXR files in a directory (including those with _SBS in filename)."""
+    try:
+        return len([f for f in os.listdir(path)
+                    if f.lower().endswith(".exr")])
+    except FileNotFoundError:
+        return 0
+
+
 def scan_shots(root: str) -> List[Shot]:
     shots: List[Shot] = []
     try:
@@ -108,12 +117,12 @@ def scan_shots(root: str) -> List[Shot]:
     except FileNotFoundError:
         return shots
     for entry in entries:
-        if not entry.is_dir() or entry.name.startswith('.'):
+        if not entry.is_dir() or entry.name.startswith('.') or entry.name == '__pycache__':
             continue
         shot_path = entry.path
         frames = frame_count(shot_path)
         sbs_path = f"{shot_path}_SBS"
-        sbs_frames = frame_count(sbs_path)
+        sbs_frames = sbs_frame_count(sbs_path)
         has_sbs = sbs_frames > 0
         if not has_sbs:
             sbs_frames = len([f for f in os.listdir(shot_path)
