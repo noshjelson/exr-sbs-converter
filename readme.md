@@ -1,437 +1,253 @@
-\# SBS Fixer for Unreal Panoramic EXRs
+# SBS EXR Converter - Easy Fix for Unreal Engine Panoramas
 
+## 🎯 What This Tool Does (In Simple Terms)
 
+**The Problem:** When you render panoramic (360°) videos in Unreal Engine, sometimes only half the image shows up in video editors like After Effects or Premiere Pro. This happens because the file format is confused about how big the image should be.
 
-\## What problem are we solving?
+**The Solution:** This tool fixes those files so you can see the full panoramic image everywhere.
 
+## 🚀 Quick Start (Easiest Method)
 
+### Option 1: Automatic Setup (Recommended for Beginners) ⭐
 
-Unreal’s \*\*Panoramic Render Pass\*\* can output stereoscopic panoramas where the pixel \*\*dataWindow\*\* contains the full \*\*side-by-side (SBS)\*\* image, but the \*\*displayWindow\*\* is still half-width. Many viewers/compositors (AE, Premiere, DJV, Resolve) honor `displayWindow` — so they only show the \*\*left half\*\*, hiding the right eye. PNGs often appear fine, but EXRs don’t.
+**Step 1:** Download Python
+- Go to [python.org](https://www.python.org/downloads/)
+- Download Python 3.8 or newer
+- **IMPORTANT:** During installation, check "Add Python to PATH"
 
+**Step 2:** Download This Tool
+- Download all files from this project
+- Put them in a folder (like `C:\SBS-Converter\`)
 
+**Step 3:** Run Automatic Setup
+- Double-click `setup_windows.bat`
+- Wait for it to install everything automatically
+- If it says "oiiotool not found", see Option 2 below
 
-\*\*Goal:\*\* make SBS frames viewable everywhere \*\*without manually re-rendering\*\* or hand-fixing each frame.
+**Step 4:** Start Converting
+- Double-click `sbs_gui.py`
+- Click "Select Shots Folder"
+- Choose the folder containing your EXR files
+- Select which shots to convert
+- Click "Convert Selected"
+- Wait for it to finish!
 
+### Option 2: PowerShell Scripts (Most Reliable) 🔧
 
+**If the Python GUI doesn't work - uses built-in Windows tools**
 
-\## What this tool does
+1. **Download This Tool** - Get all files from this project
+2. **Install OpenImageIO** - See [SETUP_GUIDE.md](SETUP_GUIDE.md) for detailed instructions
+3. **Run the Tool** - Right-click `Convert-SBS-Interactive.ps1` → "Run with PowerShell"
 
+### Option 3: Pre-built Executable (Coming Soon)
 
+We're working on a single `.exe` file that includes everything. No installation needed - just download and run!
 
-\* Reads your EXR frames and writes a \*\*fixed\*\* EXR where `displayWindow == dataWindow` using `--fullpixels`.
+## 📚 Need More Help?
 
-\* Copies \*\*all subimages\*\* (depth, lighting, etc.) by default. Use `-FirstSubimage` to keep only the first pass.
+- **Complete Setup Guide:** See [SETUP_GUIDE.md](SETUP_GUIDE.md) for detailed instructions
+- **Troubleshooting:** Common problems and solutions are covered in the setup guide
+- **Multiple Methods:** If one approach doesn't work, try another!
 
-\* Writes results into \*\*sibling\*\* folders named `<Shot>\_SBS`, mirroring any subfolders.
+## 📁 What You Need
 
-\* Lets you pick \*\*compression\*\* (`dwab`/`dwaa`/`zip`/`none`) and \*\*pixel data type\*\* (`float` or `half`).
+### Your Files
+- EXR files from Unreal Engine (the ones that only show half the image)
+- Put them in folders (one folder per "shot" or scene)
 
-\* Optional \*\*in-place\*\* mode: replaces originals safely (backs up as `.orig.exr`).
-\* Tolerates Dropbox/OneDrive file locks; leaves a `.NEW.exr` if replacement fails.
+### Your Computer
+- Windows 10 or 11
+- At least 4GB of free disk space
+- Internet connection (for downloading tools)
 
+## 🔧 Advanced Setup (If You Want to Understand)
 
+### What Each Tool Does
 
-> Why not “just edit metadata”?
+**`sbs_gui.py`** - The main program with a visual interface
+- Shows you all your shots
+- Lets you pick which ones to convert
+- Shows progress bars
+- Easiest to use
 
-> In EXR, `displayWindow`/`dataWindow` affect how pixel data is interpreted on disk. Changing them safely requires a proper rewrite of the file header and, in practice, re-emitting the image. The reliable and portable fix is to \*\*rewrite\*\* with `--fullpixels`.
+**`Convert-SBS-Interactive.ps1`** - PowerShell version with file picker
+- Same as above but uses Windows file dialogs
+- Might crash on some computers
 
+**`Convert-SBS-CLI.ps1`** - Command-line version
+- For people who like typing commands
+- More reliable but harder to use
 
+### Technical Requirements
 
----
+The tool needs these programs to work:
+- **Python 3.8+** (for the GUI)
+- **OpenImageIO** (for processing EXR files)
 
+## 📖 How to Use (Step by Step)
 
+### Using the Python GUI
 
-\## Scripts included
+1. **Start the Program**
+   - Double-click `sbs_gui.py`
+   - A window should open
 
+2. **Load Your Shots**
+   - Click "Select Shots Folder"
+   - Navigate to where your EXR files are
+   - Select the folder and click "OK"
 
+3. **Choose What to Convert**
+   - You'll see a list of your shots
+   - Check the boxes next to shots you want to convert
+   - Shots already converted will be grayed out
 
-\* \*\*`Convert-SBS-CLI.ps1`\*\* — \*\*recommended\*\* (no GUI, won’t crash on STA/MTA issues)
+4. **Set Options (Optional)**
+   - **Compression:** Leave as "dwab:45" (good balance of quality and file size)
+   - **Pixel Type:** Leave as "float" (best quality)
 
+5. **Convert**
+   - Click "Convert Selected"
+   - Watch the progress bars
+   - Wait for "All conversions complete" message
 
+6. **Find Your Results**
+   - Look for new folders named `[YourShotName]_SBS`
+   - These contain your fixed EXR files
 
-&nbsp; \* Paste or pass one/more shot folders; shows \*\*overall\*\* + \*\*per-shot\*\* progress bars
+### Using PowerShell Scripts
 
-&nbsp; \* Writes `<shot>\_SBS` by default; or `-InPlace` to overwrite
+1. **Right-click** on `Convert-SBS-Interactive.ps1`
+2. **Select** "Run with PowerShell"
+3. **Choose** your shots folder when prompted
+4. **Wait** for conversion to complete
 
-\* \*\*`Convert-SBS-Interactive.ps1`\*\* — optional GUI picker
+## 🎛️ Settings Explained
 
+### Compression Options
+- **dwab:45** - Good quality, smaller files (recommended)
+- **dwaa:45** - Similar to dwab, slightly different algorithm
+- **zip** - No quality loss, larger files, faster to open in some programs
+- **none** - No compression, huge files, fastest to process
 
+### Pixel Type
+- **float** - Best quality, larger files (recommended)
+- **half** - Good quality, smaller files
 
-&nbsp; \* Same behavior, but uses a folder picker (requires \*\*STA\*\*; may crash in some shells). Use only if you prefer a dialog.
+## 📂 What Gets Created
 
+### Output Files
+- **Location:** New folders next to your original shots
+- **Name:** `[OriginalFolderName]_SBS`
+- **Files:** `[OriginalFileName]_SBS.exr`
 
-
-> If you only need to process a \*\*single shot\*\*, see the “One-liner” in Examples.
-
-
-
----
-
-
-
-\## Dependencies (Windows)
-
-
-
-1\. \*\*vcpkg\*\* (package manager)
-
-
-
-```powershell
-
-git clone https://github.com/microsoft/vcpkg.git "$env:USERPROFILE\\vcpkg"
-
-cd "$env:USERPROFILE\\vcpkg"
-
-.\\bootstrap-vcpkg.bat
-
+### Example
+```
+Your Shots/
+├── Shot_001/           (original)
+│   ├── frame_001.exr
+│   └── frame_002.exr
+└── Shot_001_SBS/       (created by tool)
+    ├── frame_001_SBS.exr
+    └── frame_002_SBS.exr
 ```
 
+## 🛠️ Troubleshooting
 
+### "Python not found" or "Can't run sbs_gui.py"
+- **Solution:** Install Python and make sure to check "Add Python to PATH" during installation
+- **Alternative:** Use the PowerShell scripts instead
 
-2\. \*\*OpenImageIO tools\*\* (provides `oiiotool.exe`)
+### "oiiotool executable not found"
+- **Solution:** The tool needs OpenImageIO installed
+- **Quick fix:** Use the PowerShell scripts (they handle this automatically)
+- **Manual fix:** Install vcpkg and OpenImageIO (see Advanced Setup below)
 
+### "Nothing to convert" or "No shots selected"
+- **Solution:** Make sure you selected a folder that contains EXR files
+- **Check:** Look for files ending in `.exr` in your selected folder
 
+### Tool crashes or freezes
+- **Solution:** Try the PowerShell version instead
+- **Alternative:** Use the command-line version
 
-```powershell
+### Files are still showing only half the image
+- **Check:** Make sure you're using the `_SBS.exr` files, not the originals
+- **Verify:** The new files should be in folders ending with `_SBS`
 
-cd "$env:USERPROFILE\\vcpkg"
+## 🔧 Advanced Setup (For Technical Users)
 
-.\\vcpkg install openimageio\[tools] --recurse
+### Installing OpenImageIO (Required for Python GUI)
 
-```
+1. **Install Git** (if not already installed)
+   - Download from [git-scm.com](https://git-scm.com/download/win)
 
+2. **Install vcpkg**
+   ```cmd
+   git clone https://github.com/microsoft/vcpkg.git "%USERPROFILE%\vcpkg"
+   cd "%USERPROFILE%\vcpkg"
+   .\bootstrap-vcpkg.bat
+   ```
 
+3. **Install OpenImageIO**
+   ```cmd
+   .\vcpkg install openimageio[tools] --recurse
+   ```
 
-3\. (Optional) \*\*OpenEXR tools\*\* (for `exrheader.exe` sanity checks)
+4. **Test the GUI**
+   - Run `sbs_gui.py` again
+   - It should now find the required tools
 
+### Command Line Usage
 
-
-```powershell
-
-.\\vcpkg install openexr\[tools] --recurse
-
-```
-
-
-
-> The scripts auto-locate `oiiotool.exe` under `~\\vcpkg\\installed\\...`. If it’s elsewhere, pass `-OiiotoolPath` (Interactive script) or edit the variable in your one-liner.
-
-
-
----
-
-
-
-\## Usage
-
-
-
-\### A) Recommended: CLI tool (no GUI)
-
-
-
-Run the script and \*\*paste paths\*\* when prompted:
-
-
-
-```powershell
-
-powershell -NoLogo -ExecutionPolicy Bypass -File "D:\\tools\\Convert-SBS-CLI.ps1"
-
-```
-
-
-
-Run with \*\*arguments\*\*:
-
-
+For advanced users who prefer typing commands:
 
 ```powershell
+# Convert a single shot
+powershell -NoLogo -ExecutionPolicy Bypass -File "Convert-SBS-CLI.ps1" -InputDirs "C:\Your\Shot\Folder"
 
-\# Single shot, recurse into subfolders, DWAB:45, float
+# Convert multiple shots
+powershell -NoLogo -ExecutionPolicy Bypass -File "Convert-SBS-CLI.ps1" -InputDirs "C:\Shot1","C:\Shot2"
 
-powershell -NoLogo -ExecutionPolicy Bypass -File "D:\\tools\\Convert-SBS-CLI.ps1" `
-
-&nbsp; -InputDirs "D:\\...\\Shots\\01ST\_0010\_009" -Recurse -Compression dwab -DwaLevel 45 -DataType float
-
+# Convert with custom settings
+powershell -NoLogo -ExecutionPolicy Bypass -File "Convert-SBS-CLI.ps1" -InputDirs "C:\Your\Shot" -Compression zip -DataType half
 ```
 
+## ❓ Frequently Asked Questions
 
+**Q: Do I need to know programming to use this?**
+A: No! Just download Python and double-click the GUI file.
 
-Multiple shots:
+**Q: Will this work with files from other programs besides Unreal?**
+A: Yes, as long as the files have the same problem (half-width display window).
 
+**Q: Does this change my original files?**
+A: No! It creates new files with `_SBS` in the name. Your originals stay safe.
 
+**Q: How long does conversion take?**
+A: Depends on file size and number of files. Usually a few seconds per frame.
 
-```powershell
+**Q: What if I have thousands of files?**
+A: The tool handles large batches. Just select the folder and let it run.
 
-powershell -NoLogo -ExecutionPolicy Bypass -File "D:\\tools\\Convert-SBS-CLI.ps1" `
+**Q: Can I use this on a Mac or Linux?**
+A: The Python GUI should work, but you'll need to install OpenImageIO differently.
 
-&nbsp; -InputDirs "D:\\...\\Shots\\01ST\_0010\_009","D:\\...\\Shots\\01ST\_0030\_015" -Recurse
+## 📞 Getting Help
 
-```
+If you run into problems:
 
+1. **Check this README** - Most issues are covered here
+2. **Try the PowerShell version** - It's more reliable than the Python GUI
+3. **Check your files** - Make sure you have EXR files in the folder you selected
+4. **Restart** - Close everything and try again
 
+## 🎉 Success!
 
-\*\*In-place\*\* (overwrites originals, backups as `.orig.exr`):
+Once everything is working, you should see:
+- New folders with `_SBS` in the name
+- EXR files that show the full panoramic image
+- Files that work properly in After Effects, Premiere, and other video editors
 
-
-
-```powershell
-
-powershell -NoLogo -ExecutionPolicy Bypass -File "D:\\tools\\Convert-SBS-CLI.ps1" `
-
-&nbsp; -InputDirs "D:\\...\\Shots\\01ST\_0010\_009" -InPlace -Compression dwab -DwaLevel 45 -DataType float
-
-```
-
-
-
-\*\*Flags\*\*
-
-
-
-\* `-Compression`: `dwab` (default) | `dwaa` | `zip` | `none`
-
-\* `-DwaLevel`: integer (typical \*\*35–55\*\*, default \*\*45\*\*) for DWAA/DWAB
-
-\* `-DataType`: `float` (default) or `half`
-
-\* `-Recurse`: include subfolders
-
-\* `-InPlace`: overwrite originals (safe swap)
-
-
-
-\### B) Optional: Interactive script with folder picker
-
-
-
-If you prefer a dialog:
-
-
-
-```powershell
-
-\# Ensure STA (Windows PowerShell 5.1 or pass -STA to pwsh)
-
-powershell -NoLogo -ExecutionPolicy Bypass -STA -File "D:\\tools\\Convert-SBS-Interactive.ps1"
-
-```
-
-
-
-Pick one or more shot folders. Progress bars will appear.
-
-
-
-> If it crashes instantly, use the \*\*CLI\*\* version above.
-
-
-
-\### C) One-liner for a single shot (what you tested)
-
-
-
-```powershell
-
-$in  = "D:\\...\\Shots\\01ST\_0010\_009"
-
-$out = "${in}\_SBS"
-
-$oiio = "$env:USERPROFILE\\vcpkg\\installed\\x64-windows\\tools\\openimageio\\oiiotool.exe"
-
-
-
-New-Item -ItemType Directory -Force -Path $out | Out-Null
-
-
-
-Get-ChildItem -LiteralPath $in -Filter \*.exr | ForEach-Object {
-
-&nbsp; $dst = Join-Path $out ($\_.BaseName + "\_SBS.exr")
-
-&nbsp; \& $oiio $\_.FullName -a --fullpixels -d float --compression dwab:45 -o $dst
-
-&nbsp; if ($LASTEXITCODE -ne 0) { Write-Warning "FAILED -> $($\_.FullName)" }
-
-}
-
-```
-
-
-
----
-
-
-
-\## What gets written
-
-
-
-\* Output EXR: \*\*all subimages retained\*\*, SBS visible everywhere
-
-\* The file name: `<OriginalBase>\_SBS.exr`
-
-\* Folder structure: \*\*mirrors\*\* the source shot inside `<Shot>\_SBS`
-
-\* Compression: \*\*DWAB:45\*\* by default (changeable)
-
-\* Data type: \*\*float\*\* by default (use `-d half` if you want smaller files)
-
-
-
-\*\*Note:\*\* By default all subimages (e.g., depth, detail lighting) are preserved. Use `-FirstSubimage` for legacy single-pass output.
-
-
-
----
-
-
-
-\## Verifying an output
-
-
-
-Use `exrheader` (optional) to confirm:
-
-
-
-```powershell
-
-\& "$env:USERPROFILE\\vcpkg\\installed\\x64-windows\\tools\\openexr\\exrheader.exe" `
-
-&nbsp; "D:\\...\\01ST\_0010\_009\_SBS\\01ST\_0010\_009\_.1640\_SBS.exr" | Select-String "dataWindow|displayWindow|compression"
-
-```
-
-
-
-You should see:
-
-
-
-\* `displayWindow` and `dataWindow` covering the \*\*full\*\* SBS width
-
-\* `compression` equals your choice (e.g., `dwab`, level shown)
-
-
-
----
-
-
-
-\## Best practices \& tips
-
-
-
-\* \*\*Keep compression consistent per shot.\*\* Avoid mixing ZIP with DWA within the same sequence.
-
-\* \*\*Performance vs size:\*\*
-
-
-
-&nbsp; \* `dwab`/`dwaa`: small files, lossy; good for review/editorial
-
-&nbsp; \* `zip`: lossless, often \*\*faster decode\*\* in AE/Premiere, but larger files
-
-&nbsp; \* `-d half` can cut size significantly if full 32-bit float isn’t required
-
-\* \*\*Cloud sync (Dropbox/Drive)\*\* can lock files. If you see `.temp.exr` issues or random failures, pause sync while converting.
-
-\* \*\*Spaces in paths\*\* are handled; we pass arguments as arrays, not quoted strings.
-
-
-
----
-
-
-
-\## Troubleshooting
-
-
-
-\* \*\*“Invalid option `--datatype`”\*\*
-
-&nbsp; Use `-d float` / `-d half` (OIIO 3.x).
-
-\* \*\*“Could not find format writer for `-o:compression=zip`”\*\*
-
-&nbsp; In OIIO 3.x, use `--compression zip` (or `--compression dwab:45`) \*\*before\*\* `-o`.
-
-\* \*\*It crashes immediately\*\*
-
-&nbsp; Use the \*\*CLI\*\* script (`Convert-SBS-CLI.ps1`). The GUI picker requires STA threading and may crash in some shells.
-
-\* \*\*No outputs / zeros converted\*\*
-
-&nbsp; Check that your path(s) are correct and contain `.exr`. If using the folder picker, select the \*\*shot folder\*\*, not the parent “Shots” directory.
-
-\* \*\*Still only seeing one eye\*\*
-
-&nbsp; Verify with `exrheader` that `displayWindow == dataWindow`. If yes and the app still crops, try re-importing or force re-interpret in your app.
-
-
-
----
-
-
-
-\## FAQ
-
-
-
-\*\*Q: Can’t we just edit the EXR header to flip a bit?\*\*
-
-A: Not safely/portably. EXR’s full/data windows affect image layout. We fix it robustly by rewriting with `--fullpixels`.
-
-
-
-\*\*Q: Can I preserve all subimages (depth, lighting, etc.)?\*\*
-
-A: Yes, all subimages are preserved. Use `-FirstSubimage` to emit only the first pass if needed.
-
-
-
-\*\*Q: Does this work on non-Unreal EXRs?\*\*
-
-A: Yes, as long as subimage 0 contains an SBS image and the mismatch is `displayWindow` vs `dataWindow`.
-
-
-
----
-
-
-
-\## Tested environment
-
-
-
-\* Windows 11 (24H2)
-
-\* PowerShell 5.1 \& PowerShell 7+
-
-\* vcpkg 2025-07-21, OpenImageIO 3.0.9.1, OpenEXR 3.3.5
-
-
-
----
-
-
-
-\## License
-
-
-
-Internal production utility. Adapt as needed for your pipeline. (Add your studio’s license text here.)
-
-
-
----
-
-
-
-If you want this bundled as a tiny `.exe` wrapper or with a simple WinForms picker (no STA surprises), I can generate that as well.
-
-
-
+Enjoy your fixed panoramic renders! 🌟

@@ -1,0 +1,8 @@
+# Python dependencies for SBS EXR Converter
+# Install with: pip install -r requirements.txt
+
+# GUI framework (usually included with Python)
+# tkinter is built into Python, no pip install needed
+
+# For future enhancements
+requests>=2.25.0

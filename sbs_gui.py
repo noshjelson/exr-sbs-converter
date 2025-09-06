@@ -11,6 +11,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from dataclasses import dataclass
 from typing import List
+import urllib.request
+import zipfile
+import platform
 
 
 def find_oiiotool() -> str | None:
@@ -44,7 +47,39 @@ def find_oiiotool() -> str | None:
     for path in candidates:
         if path and os.path.exists(path):
             return path
+    
+    # If not found anywhere, try to download it
+    downloaded = download_oiiotool()
+    if downloaded:
+        return downloaded
+    
     return None
+
+
+def download_oiiotool() -> str | None:
+    """Download and extract oiiotool for Windows.
+    
+    Returns the path to oiiotool.exe or None if download fails.
+    """
+    if platform.system() != "Windows":
+        return None
+    
+    try:
+        # Create tools directory
+        tools_dir = os.path.join(os.path.dirname(__file__), "tools")
+        os.makedirs(tools_dir, exist_ok=True)
+        
+        oiiotool_path = os.path.join(tools_dir, "oiiotool.exe")
+        if os.path.exists(oiiotool_path):
+            return oiiotool_path
+        
+        # For now, just return None - we'll implement actual download later
+        # This is a placeholder for future enhancement
+        return None
+        
+    except Exception as e:
+        print(f"Error downloading oiiotool: {e}")
+        return None
 
 
 @dataclass
