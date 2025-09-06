@@ -18,6 +18,16 @@ class Shot:
     name: str
     path: str
     has_sbs: bool
+    frames: int
+    sbs_frames: int
+
+
+def frame_count(path: str) -> int:
+    try:
+        return len([f for f in os.listdir(path)
+                    if f.lower().endswith(".exr") and "_SBS" not in f])
+    except FileNotFoundError:
+        return 0
 
 
 def scan_shots(root: str) -> List[Shot]:
@@ -30,14 +40,15 @@ def scan_shots(root: str) -> List[Shot]:
         if not entry.is_dir() or entry.name.startswith('.'):
             continue
         shot_path = entry.path
+        frames = frame_count(shot_path)
         sbs_path = f"{shot_path}_SBS"
-        has_sbs = os.path.exists(sbs_path)
+        sbs_frames = frame_count(sbs_path)
+        has_sbs = sbs_frames > 0
         if not has_sbs:
-            for f in os.listdir(shot_path):
-                if f.lower().endswith(".exr") and "_SBS" in f:
-                    has_sbs = True
-                    break
-        shots.append(Shot(entry.name, shot_path, has_sbs))
+            sbs_frames = len([f for f in os.listdir(shot_path)
+                              if f.lower().endswith(".exr") and "_SBS" in f])
+            has_sbs = sbs_frames > 0
+        shots.append(Shot(entry.name, shot_path, has_sbs, frames, sbs_frames))
     return shots
 
 
@@ -91,6 +102,20 @@ class ConverterGUI(tk.Tk):
         content.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.shots_frame = ttk.LabelFrame(content, text="Shots")
         self.shots_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        btns = ttk.Frame(self.shots_frame)
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="Select All", command=self.select_all).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Deselect All", command=self.deselect_all).pack(side=tk.LEFT, padx=5)
+        self.shots_canvas = tk.Canvas(self.shots_frame)
+        self.shots_scroll = ttk.Scrollbar(self.shots_frame, orient="vertical", command=self.shots_canvas.yview)
+        self.shots_inner = ttk.Frame(self.shots_canvas)
+        self.shots_inner.bind(
+            "<Configure>", lambda e: self.shots_canvas.configure(scrollregion=self.shots_canvas.bbox("all"))
+        )
+        self.shots_canvas.create_window((0, 0), window=self.shots_inner, anchor="nw")
+        self.shots_canvas.configure(yscrollcommand=self.shots_scroll.set)
+        self.shots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.shots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_frame = ttk.LabelFrame(content, text="Preview")
         self.preview_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
         self.thumb_label = ttk.Label(self.preview_frame)
@@ -120,6 +145,7 @@ class ConverterGUI(tk.Tk):
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.log = tk.Text(log_frame, height=8)
         self.log.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(log_frame, text="Save Log", command=self.save_log).pack(anchor=tk.E, pady=5)
 
     # Folder scan ---------------------------------------------------------
     def load_folder(self) -> None:
@@ -127,12 +153,14 @@ class ConverterGUI(tk.Tk):
         if not folder:
             return
         self.shots = scan_shots(folder)
-        for child in self.shots_frame.winfo_children():
+        for child in self.shots_inner.winfo_children():
             child.destroy()
+        self.shots_canvas.yview_moveto(0)
         self.shot_vars = []
         for shot in self.shots:
             var = tk.BooleanVar(value=not shot.has_sbs)
-            cb = ttk.Checkbutton(self.shots_frame, text=shot.name, variable=var,
+            label = f"{shot.name} (src {shot.frames}, sbs {shot.sbs_frames})"
+            cb = ttk.Checkbutton(self.shots_inner, text=label, variable=var,
                                  command=lambda s=shot: self.update_preview(s))
             if shot.has_sbs:
                 cb.state(["disabled"])
@@ -140,6 +168,15 @@ class ConverterGUI(tk.Tk):
             self.shot_vars.append(var)
         if self.shots:
             self.update_preview(self.shots[0])
+
+    def select_all(self) -> None:
+        for var, shot in zip(self.shot_vars, self.shots):
+            if not shot.has_sbs:
+                var.set(True)
+
+    def deselect_all(self) -> None:
+        for var in self.shot_vars:
+            var.set(False)
 
     # Conversion ---------------------------------------------------------
     def start_convert(self) -> None:
@@ -248,8 +285,19 @@ class ConverterGUI(tk.Tk):
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
             messagebox.showerror("Conversion failed", result.stderr.strip())
+            self.log.insert(tk.END, f"{os.path.basename(file)} failed - {result.stderr.strip()}\n")
         else:
             messagebox.showinfo("Conversion complete", f"Saved {out}")
+            self.log.insert(tk.END, f"Converted {os.path.basename(file)}\n")
+        self.log.see(tk.END)
+
+    def save_log(self) -> None:
+        file = filedialog.asksaveasfilename(title="Save Log", defaultextension=".txt",
+                                            filetypes=[("Text Files", "*.txt")])
+        if not file:
+            return
+        with open(file, "w", encoding="utf-8") as fh:
+            fh.write(self.log.get("1.0", tk.END))
 
     # Queue processing ----------------------------------------------------
     def process_queue(self) -> None:
