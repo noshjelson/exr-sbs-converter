@@ -14,6 +14,7 @@ from typing import List
 import urllib.request
 import zipfile
 import platform
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def find_oiiotool() -> str | None:
@@ -314,14 +315,17 @@ class ConverterGUI(tk.Tk):
             if not frames:
                 self.queue.put(("log", f"{shot.name}: No frames to convert (already complete?)"))
                 continue
-                
+
             self.queue.put(("shot", shot.name, 0, len(frames)))
             self.queue.put(("log", f"{shot.name}: Converting {len(frames)} frames..."))
-            
+
             outdir = f"{shot.path}_SBS"
             os.makedirs(outdir, exist_ok=True)
-            
-            for idx, frame in enumerate(frames, 1):
+
+            datatype = self.datatype.get()
+            compression = self.compression.get()
+
+            def process(frame: str) -> tuple[str, int, str]:
                 src = os.path.join(shot.path, frame)
                 dst = os.path.join(outdir, frame.replace(".exr", "_SBS.exr"))
                 cmd = [
@@ -329,9 +333,9 @@ class ConverterGUI(tk.Tk):
                     src,
                     "--fullpixels",
                     "-d",
-                    self.datatype.get(),
+                    datatype,
                     "--compression",
-                    self.compression.get(),
+                    compression,
                     "-o",
                     dst,
                 ]
@@ -339,22 +343,25 @@ class ConverterGUI(tk.Tk):
                     result = subprocess.run(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
                     )
+                    return frame, result.returncode, result.stderr.strip()
                 except FileNotFoundError:
-                    self.queue.put(
-                        (
-                            "log",
-                            "oiiotool executable not found. Please install OpenImageIO tools.",
-                        )
-                    )
-                    self.queue.put(("done",))
-                    return
-                if result.returncode != 0:
-                    self.queue.put(("log", f"{shot.name}: {frame} failed - {result.stderr.strip()}"))
-                else:
-                    self.queue.put(("log", f"{shot.name}: {frame} ✅"))
-                done += 1
-                self.queue.put(("shot", shot.name, idx, len(frames)))
-                self.queue.put(("overall", done, total_frames))
+                    return frame, -1, "oiiotool executable not found. Please install OpenImageIO tools."
+
+            with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+                futures = {executor.submit(process, f): f for f in frames}
+                for idx, future in enumerate(as_completed(futures), 1):
+                    frame, retcode, stderr = future.result()
+                    if retcode == -1:
+                        self.queue.put(("log", stderr))
+                        self.queue.put(("done",))
+                        return
+                    if retcode != 0:
+                        self.queue.put(("log", f"{shot.name}: {frame} failed - {stderr}"))
+                    else:
+                        self.queue.put(("log", f"{shot.name}: {frame} ✅"))
+                    done += 1
+                    self.queue.put(("shot", shot.name, idx, len(frames)))
+                    self.queue.put(("overall", done, total_frames))
             self.queue.put(("log", f"✅ Finished {shot.name}"))
         self.queue.put(("log", "🎉 All conversions complete!"))
         self.queue.put(("done",))
