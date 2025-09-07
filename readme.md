@@ -111,6 +111,7 @@ The tool needs these programs to work:
    - Click "Convert Selected"
    - Watch the progress bars
    - Wait for "All conversions complete" message
+   - The tool processes multiple frames in parallel, using all available CPU cores
 
 6. **Find Your Results**
    - Look for new folders named `[YourShotName]_SBS`
