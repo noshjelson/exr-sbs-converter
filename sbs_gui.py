@@ -7,6 +7,7 @@ import queue
 import tempfile
 import shutil
 import sys
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from dataclasses import dataclass
@@ -15,6 +16,11 @@ import urllib.request
 import zipfile
 import platform
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None
 
 
 def find_oiiotool() -> str | None:
@@ -192,6 +198,11 @@ class ConverterGUI(tk.Tk):
         self.shots_canvas.configure(yscrollcommand=self.shots_scroll.set)
         self.shots_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.shots_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Enable mouse wheel scrolling
+        self.shots_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.shots_canvas.bind("<Button-4>", self._on_mousewheel)  # Linux scroll up
+        self.shots_canvas.bind("<Button-5>", self._on_mousewheel)  # Linux scroll down
         self.preview_frame = ttk.LabelFrame(content, text="Preview")
         self.preview_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
         self.thumb_label = ttk.Label(self.preview_frame)
@@ -216,6 +227,10 @@ class ConverterGUI(tk.Tk):
         self.shot_label.pack(anchor=tk.W, pady=(10, 0))
         self.shot_pb = ttk.Progressbar(prog, length=560)
         self.shot_pb.pack()
+        self.eta_label = ttk.Label(prog, text="ETA: --:--:--")
+        self.eta_label.pack(anchor=tk.W, pady=(5, 0))
+        self.cpu_label = ttk.Label(prog, text="CPU: --%")
+        self.cpu_label.pack(anchor=tk.W)
 
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -284,6 +299,21 @@ class ConverterGUI(tk.Tk):
         for var in self.shot_vars:
             var.set(False)
 
+    def _on_mousewheel(self, event) -> None:
+        """Scroll the shots list with the mouse wheel."""
+        if event.delta:
+            self.shots_canvas.yview_scroll(int(-event.delta / 120), "units")
+        elif event.num == 4:
+            self.shots_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.shots_canvas.yview_scroll(1, "units")
+
+    def _format_time(self, seconds: float) -> str:
+        """Format seconds into HH:MM:SS."""
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
     # Conversion ---------------------------------------------------------
     def start_convert(self) -> None:
         selected = [s for s, v in zip(self.shots, self.shot_vars) if v.get() and s.needs_conversion]
@@ -308,6 +338,9 @@ class ConverterGUI(tk.Tk):
     def _convert_worker(self, shots: List[Shot], oiiotool: str) -> None:
         total_frames = sum(self._frame_count(s.path) for s in shots)
         done = 0
+        start_time = time.time()
+        if psutil:
+            psutil.cpu_percent()
         self.queue.put(("overall", done, total_frames))
         
         for shot in shots:
@@ -362,6 +395,12 @@ class ConverterGUI(tk.Tk):
                     done += 1
                     self.queue.put(("shot", shot.name, idx, len(frames)))
                     self.queue.put(("overall", done, total_frames))
+                    if psutil:
+                        self.queue.put(("cpu", psutil.cpu_percent()))
+                    if done:
+                        elapsed = time.time() - start_time
+                        eta = (total_frames - done) * (elapsed / done)
+                        self.queue.put(("eta", eta))
             self.queue.put(("log", f"✅ Finished {shot.name}"))
         self.queue.put(("log", "🎉 All conversions complete!"))
         self.queue.put(("done",))
@@ -518,6 +557,16 @@ class ConverterGUI(tk.Tk):
                     _, text = msg
                     self.log.insert(tk.END, text + "\n")
                     self.log.see(tk.END)
+                elif msg[0] == "eta":
+                    _, remaining = msg
+                    self.eta_label.config(text=f"ETA: {self._format_time(remaining)}")
+                elif msg[0] == "cpu":
+                    _, percent = msg
+                    if os.cpu_count():
+                        threads = percent / 100 * os.cpu_count()
+                        self.cpu_label.config(text=f"CPU: {percent:.0f}% (~{threads:.1f} threads)")
+                    else:
+                        self.cpu_label.config(text=f"CPU: {percent:.0f}%")
                 elif msg[0] == "done":
                     self.convert_btn.config(state=tk.NORMAL)
         except queue.Empty:

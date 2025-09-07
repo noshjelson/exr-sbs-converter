@@ -99,7 +99,7 @@ The tool needs these programs to work:
    - Select the folder and click "OK"
 
 3. **Choose What to Convert**
-   - You'll see a list of your shots
+   - You'll see a list of your shots (use the mouse wheel to scroll)
    - Check the boxes next to shots you want to convert
    - Shots already converted will be grayed out
 
@@ -109,7 +109,7 @@ The tool needs these programs to work:
 
 5. **Convert**
    - Click "Convert Selected"
-   - Watch the progress bars
+   - Watch the progress bars with estimated time remaining and CPU thread usage
    - Wait for "All conversions complete" message
    - The tool processes multiple frames in parallel, using all available CPU cores
 
