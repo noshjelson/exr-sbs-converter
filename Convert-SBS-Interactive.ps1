@@ -130,6 +130,10 @@ for ($s=0; $s -lt $totShots; $s++) {
   $ok=0; $fail=0
   $shotRoot = (Resolve-Path -LiteralPath $shotPath).Path
 
+  $maxProcs = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+  $running = @()
+  $convertedFiles = @{}
+
   for ($i=0; $i -lt $total; $i++) {
     $f = $frames[$i]
     $src = (Resolve-Path -LiteralPath $f.FullName).Path
@@ -141,7 +145,7 @@ for ($s=0; $s -lt $totShots; $s++) {
     if (-not $InPlace) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
 
     $base   = [System.IO.Path]::GetFileNameWithoutExtension($src)
-    $dstNew = Join-Path $dstDir ($base + "_SBS.NEW.exr")
+    $dstNew = Join-Path $dstDir ($base + "_SBS.NEW.exx") # Use a different extension to avoid conflicts
     $dst    = if ($InPlace) { Join-Path $dstDir ($base + ".exr") } else { Join-Path $dstDir ($base + "_SBS.exr") }
 
     # Progress bars
@@ -151,38 +155,77 @@ for ($s=0; $s -lt $totShots; $s++) {
     Write-Progress -Id 2 -ParentId 1 -Activity "Converting frames" -Status "$($i+1)/$total  $($f.Name)" -PercentComplete $filePct
 
     # Build args and run
-    $args = @($src) + (if ($FirstSubimage) { @('--subimage','0') } else { @('-a') }) + @('--fullpixels','-d',$DataType) + $compArgs + @('-o',$dst)
+    $args = @($src) + (if ($FirstSubimage) { @('--subimage','0') } else { @('-a') }) + @('--fullpixels','-d',$DataType) + $compArgs + @('-o',$dstNew)
 
-    & $OiiotoolPath @args
-    if ($LASTEXITCODE -eq 0) {
-      if ($InPlace) {
-        # Backup original before replacement
-        $bak = Join-Path $dstDir ($base + ".orig.exr")
-        try {
-          if (-not (Test-Path -LiteralPath $bak)) {
-            Rename-Item -LiteralPath $src -NewName ([System.IO.Path]::GetFileName($bak))
-          } else {
-            Remove-Item -LiteralPath $src -Force
-          }
-        } catch {
-          Write-Warning "InPlace swap failed for $src : $($_.Exception.Message)"
-          $fail++; $grandFail++
-          if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
-          continue
+    $proc = Start-Process -FilePath $OiiotoolPath -ArgumentList $args -NoNewWindow -PassThru
+    $running += $proc
+    $convertedFiles[$proc.Id] = @{ Src = $src; Dst = $dst; DstNew = $dstNew }
+
+    if ($running.Count -ge $maxProcs) {
+        $procToWait = Wait-Process -Process $running -Any
+        $running = $running | Where-Object { $_.Id -ne $procToWait.Id }
+    }
+  }
+
+  # Wait for remaining processes
+  foreach ($proc in $running) {
+    $proc.WaitForExit()
+  }
+
+  # Now handle the results
+  foreach ($procId in $convertedFiles.Keys) {
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    $fileInfo = $convertedFiles[$procId]
+    $src = $fileInfo.Src
+    $dst = $fileInfo.Dst
+    $dstNew = $fileInfo.DstNew
+
+    if ($proc -and $proc.ExitCode -eq 0) {
+        if ($InPlace) {
+            $bak = $src -replace '.exr
+
+  Write-Progress -Id 2 -ParentId 1 -Completed
+  $overallPctDone = [int](100*($s+1)/$totShots)
+  Write-Progress -Id 1 -Activity "Shots" -Status "[$($s+1)/$totShots] $shotName done — OK:$ok Fail:$fail  ->  $destRoot" -PercentComplete $overallPctDone
+}
+
+Write-Progress -Id 1 -Completed
+Write-Host "ALL DONE. Shots: $totShots   Converted: $grandOK   Failed: $grandFail"
+if ($InPlace) {
+  Write-Host "In-place mode used. Original files were backed up as *.orig.exr in the same folders."
+}
+, '.orig.exr'
+            try {
+                if (-not (Test-Path -LiteralPath $bak)) {
+                    Rename-Item -LiteralPath $src -NewName ([System.IO.Path]::GetFileName($bak))
+                } else {
+                    Remove-Item -LiteralPath $src -Force
+                }
+                if (Wait-UnlockedAndReplace -TempPath $dstNew -FinalPath $dst) {
+                    $ok++; $grandOK++
+                    if (-not $Quiet) { Write-Host " OK -> $dst" }
+                } else {
+                    Write-Warning "Could not replace $dst (locked?); left $dstNew"
+                    $fail++; $grandFail++
+                }
+            } catch {
+                Write-Warning "InPlace swap failed for $src : $($_.Exception.Message)"
+                $fail++; $grandFail++
+                if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
+            }
+        } else {
+            if (Wait-UnlockedAndReplace -TempPath $dstNew -FinalPath $dst) {
+                $ok++; $grandOK++
+                if (-not $Quiet) { Write-Host " OK -> $dst" }
+            } else {
+                Write-Warning "Could not replace $dst (locked?); left $dstNew"
+                $fail++; $grandFail++
+            }
         }
-      }
-
-      if (Wait-UnlockedAndReplace -TempPath $dstNew -FinalPath $dst) {
-        $ok++; $grandOK++
-        if (-not $Quiet) { Write-Host " OK -> $dst" }
-      } else {
-        Write-Warning "Could not replace $dst (locked?); left $dstNew"
-        $fail++; $grandFail++
-      }
     } else {
-      $fail++; $grandFail++
-      if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
-      if (-not $Quiet) { Write-Warning " FAIL ($LASTEXITCODE) -> $src" }
+        $fail++; $grandFail++
+        if (Test-Path -LiteralPath $dstNew) { Remove-Item -LiteralPath $dstNew -ErrorAction SilentlyContinue }
+        if (-not $Quiet) { Write-Warning " FAIL ($($proc.ExitCode)) -> $src" }
     }
   }
 

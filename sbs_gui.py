@@ -155,6 +155,7 @@ class ConverterGUI(tk.Tk):
         self.oiiotool = find_oiiotool()
         self.thumbnail: tk.PhotoImage | None = None
         self.current_frame: str = ""
+        self.scanning = False
         self._build_widgets()
         self.after(100, self.process_queue)
 
@@ -162,8 +163,10 @@ class ConverterGUI(tk.Tk):
     def _build_widgets(self) -> None:
         top = ttk.Frame(self)
         top.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Button(top, text="Select Shots Folder", command=self.load_folder).pack(side=tk.LEFT)
-        ttk.Button(top, text="🔄 Refresh", command=self.refresh_folder).pack(side=tk.LEFT, padx=5)
+        self.load_folder_btn = ttk.Button(top, text="Select Shots Folder", command=self.load_folder)
+        self.load_folder_btn.pack(side=tk.LEFT)
+        self.refresh_btn = ttk.Button(top, text="🔄 Refresh", command=self.refresh_folder)
+        self.refresh_btn.pack(side=tk.LEFT, padx=5)
 
         opts = ttk.Frame(self)
         opts.pack(fill=tk.X, padx=10, pady=5)
@@ -179,6 +182,10 @@ class ConverterGUI(tk.Tk):
         ttk.Combobox(opts, textvariable=self.datatype,
                      values=["float", "half"],
                      state="readonly").grid(row=1, column=1, sticky=tk.W)
+
+        ttk.Label(opts, text="Max Parallel Jobs:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
+        self.max_workers = tk.IntVar(value=os.cpu_count() or 4)
+        ttk.Spinbox(opts, from_=1, to=os.cpu_count() or 32, textvariable=self.max_workers).grid(row=0, column=3, sticky=tk.W)
 
         content = ttk.Frame(self)
         content.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -255,11 +262,29 @@ class ConverterGUI(tk.Tk):
     def load_folder_from_path(self, folder: str) -> None:
         """Load folder from a specific path (used by refresh)."""
         self.current_folder = folder
-        self.shots = scan_shots(folder)
+        self.queue.put(("scan_started",))
+        threading.Thread(
+            target=self._scan_worker,
+            args=(folder,),
+            daemon=True,
+        ).start()
+
+    def _scan_worker(self, folder: str) -> None:
+        """Scan for shots in a background thread."""
+        shots = scan_shots(folder)
+        self.queue.put(("scan_finished", shots))
+
+    def _update_shot_list(self, shots: List[Shot]) -> None:
+        """Update the UI with the list of shots."""
+        self.shots = shots
         for child in self.shots_inner.winfo_children():
             child.destroy()
         self.shots_canvas.yview_moveto(0)
         self.shot_vars = []
+        if not shots:
+            ttk.Label(self.shots_inner, text="No shots found.").pack(pady=10)
+            return
+
         for shot in self.shots:
             var = tk.BooleanVar(value=shot.needs_conversion)
             
@@ -343,65 +368,90 @@ class ConverterGUI(tk.Tk):
             psutil.cpu_percent()
         self.queue.put(("overall", done, total_frames))
         
-        for shot in shots:
-            frames = self._frame_list(shot.path)
-            if not frames:
-                self.queue.put(("log", f"{shot.name}: No frames to convert (already complete?)"))
-                continue
+        max_workers = self.max_workers.get()
+        semaphore = threading.Semaphore(max_workers)
 
-            self.queue.put(("shot", shot.name, 0, len(frames)))
-            self.queue.put(("log", f"{shot.name}: Converting {len(frames)} frames..."))
-
-            outdir = f"{shot.path}_SBS"
-            os.makedirs(outdir, exist_ok=True)
-
-            datatype = self.datatype.get()
-            compression = self.compression.get()
-
-            def process(frame: str) -> tuple[str, int, str]:
+        def process(shot: Shot, frame: str, outdir: str) -> tuple[str, str, int, str]:
+            """Process a single frame, respecting the semaphore."""
+            with semaphore:
                 src = os.path.join(shot.path, frame)
                 dst = os.path.join(outdir, frame.replace(".exr", "_SBS.exr"))
+                
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".exr", dir=outdir, delete=False) as tmp:
+                        temp_dst = tmp.name
+                except Exception as e:
+                    return shot.name, frame, -1, f"Failed to create temp file: {e}"
+
                 cmd = [
                     oiiotool,
                     src,
                     "--fullpixels",
                     "-d",
-                    datatype,
+                    self.datatype.get(),
                     "--compression",
-                    compression,
+                    self.compression.get(),
                     "-o",
-                    dst,
+                    temp_dst,
                 ]
+                
                 try:
                     result = subprocess.run(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False
                     )
-                    return frame, result.returncode, result.stderr.strip()
-                except FileNotFoundError:
-                    return frame, -1, "oiiotool executable not found. Please install OpenImageIO tools."
-
-            with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
-                futures = {executor.submit(process, f): f for f in frames}
-                for idx, future in enumerate(as_completed(futures), 1):
-                    frame, retcode, stderr = future.result()
-                    if retcode == -1:
-                        self.queue.put(("log", stderr))
-                        self.queue.put(("done",))
-                        return
-                    if retcode != 0:
-                        self.queue.put(("log", f"{shot.name}: {frame} failed - {stderr}"))
+                    
+                    if result.returncode != 0:
+                        return shot.name, frame, result.returncode, result.stderr.strip()
                     else:
-                        self.queue.put(("log", f"{shot.name}: {frame} ✅"))
-                    done += 1
-                    self.queue.put(("shot", shot.name, idx, len(frames)))
-                    self.queue.put(("overall", done, total_frames))
-                    if psutil:
-                        self.queue.put(("cpu", psutil.cpu_percent()))
-                    if done:
-                        elapsed = time.time() - start_time
-                        eta = (total_frames - done) * (elapsed / done)
-                        self.queue.put(("eta", eta))
-            self.queue.put(("log", f"✅ Finished {shot.name}"))
+                        os.rename(temp_dst, dst)
+                        return shot.name, frame, 0, ""
+                except Exception as e:
+                    return shot.name, frame, -1, str(e)
+                finally:
+                    if os.path.exists(temp_dst):
+                        try:
+                            os.remove(temp_dst)
+                        except OSError:
+                            pass # Ignore errors on temp file removal
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for shot in shots:
+                frames = self._frame_list(shot.path)
+                if not frames:
+                    self.queue.put(("log", f"{shot.name}: No frames to convert (already complete?)"))
+                    continue
+
+                outdir = f"{shot.path}_SBS"
+                os.makedirs(outdir, exist_ok=True)
+
+                self.queue.put(("shot", shot.name, 0, len(frames)))
+                self.queue.put(("log", f"{shot.name}: Converting {len(frames)} frames..."))
+                for frame in frames:
+                    futures.append(executor.submit(process, shot, frame, outdir))
+
+            shot_progress = {shot.name: {"done": 0, "total": len(self._frame_list(shot.path))} for shot in shots}
+
+            for future in as_completed(futures):
+                shot_name, frame, retcode, stderr = future.result()
+                
+                if retcode != 0:
+                    self.queue.put(("log", f"{shot_name}: {frame} failed - {stderr}"))
+                else:
+                    self.queue.put(("log", f"{shot_name}: {frame} ✅"))
+                
+                done += 1
+                shot_progress[shot_name]["done"] += 1
+                self.queue.put(("shot", shot_name, shot_progress[shot_name]["done"], shot_progress[shot_name]["total"]))
+                self.queue.put(("overall", done, total_frames))
+                
+                if psutil:
+                    self.queue.put(("cpu", psutil.cpu_percent()))
+                if done:
+                    elapsed = time.time() - start_time
+                    eta = (total_frames - done) * (elapsed / done)
+                    self.queue.put(("eta", eta))
+
         self.queue.put(("log", "🎉 All conversions complete!"))
         self.queue.put(("done",))
 
@@ -545,7 +595,19 @@ class ConverterGUI(tk.Tk):
         try:
             while True:
                 msg = self.queue.get_nowait()
-                if msg[0] == "shot":
+                if msg[0] == "scan_started":
+                    self.scanning = True
+                    self.load_folder_btn.config(state=tk.DISABLED)
+                    self.refresh_btn.config(state=tk.DISABLED)
+                    for child in self.shots_inner.winfo_children():
+                        child.destroy()
+                    ttk.Label(self.shots_inner, text="Scanning...").pack(pady=10)
+                elif msg[0] == "scan_finished":
+                    self.scanning = False
+                    self.load_folder_btn.config(state=tk.NORMAL)
+                    self.refresh_btn.config(state=tk.NORMAL)
+                    self._update_shot_list(msg[1])
+                elif msg[0] == "shot":
                     _, name, done, total = msg
                     self.shot_label.config(text=f"{name}: {done}/{total}")
                     self.shot_pb.configure(maximum=total, value=done)
