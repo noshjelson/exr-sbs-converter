@@ -180,6 +180,7 @@ class ConverterGUI(tk.Tk):
 
         self._build_widgets()
         self.after(100, self.process_queue)
+        self.after(60000, self._periodic_cleanup)
 
     # UI -----------------------------------------------------------------
     def _build_widgets(self) -> None:
@@ -404,8 +405,53 @@ class ConverterGUI(tk.Tk):
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    # Cleanup ------------------------------------------------------------
+    def _periodic_cleanup(self) -> None:
+        """Periodically scan for and remove old temp files."""
+        if hasattr(self, 'current_folder') and self.current_folder:
+            threading.Thread(
+                target=self._cleanup_temp_files,
+                args=(self.current_folder,),
+                daemon=True
+            ).start()
+        # Reschedule after 1 minute
+        self.after(60000, self._periodic_cleanup)
+
+    def _cleanup_temp_files(self, folder: str) -> None:
+        """Scan for and remove temporary .exr files older than 5 minutes."""
+        self.queue.put(("log", "🧹 Running periodic cleanup..."))
+        now = time.time()
+        cleaned_count = 0
+        try:
+            for entry in os.scandir(folder):
+                if entry.is_dir() and entry.name.endswith("_SBS"):
+                    sbs_dir = entry.path
+                    for sub_entry in os.scandir(sbs_dir):
+                        if sub_entry.is_file() and sub_entry.name.startswith("tmp") and sub_entry.name.endswith(".exr"):
+                            try:
+                                file_path = sub_entry.path
+                                file_age = now - os.path.getmtime(file_path)
+                                if file_age > 300:  # 5 minutes
+                                    os.remove(file_path)
+                                    self.queue.put(("log", f"Removed old temp file: {file_path}"))
+                                    cleaned_count += 1
+                            except (OSError, FileNotFoundError) as e:
+                                self.queue.put(("log", f"Error removing temp file {sub_entry.name}: {e}"))
+        except (OSError, FileNotFoundError) as e:
+            self.queue.put(("log", f"Error during cleanup scan: {e}"))
+        
+        if cleaned_count > 0:
+            self.queue.put(("log", f"🧹 Cleanup finished. Removed {cleaned_count} files."))
+        else:
+            self.queue.put(("log", "🧹 Cleanup finished. No old temp files found."))
+
     # Conversion ---------------------------------------------------------
     def start_convert(self) -> None:
+        # Run a cleanup pass before starting a new conversion
+        if hasattr(self, 'current_folder') and self.current_folder:
+            self.queue.put(("log", "Running pre-conversion cleanup..."))
+            self._cleanup_temp_files(self.current_folder)
+
         selected = [s for s, v in zip(self.shots, self.shot_vars) if v.get() and s.needs_conversion]
         if not selected:
             messagebox.showinfo("Nothing to convert", "No shots selected for conversion.")
