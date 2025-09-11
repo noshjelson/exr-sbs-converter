@@ -169,8 +169,10 @@ class ConverterGUI(tk.Tk):
         self.current_frame: str = ""
         self.scanning = False
 
-        # Custom styles for progress bars
+        # Custom styles
         style = ttk.Style(self)
+        style.configure("yellow.TLabel", foreground="yellow")
+        style.configure("blue.TLabel", foreground="blue")
         style.configure("green.Horizontal.TProgressbar", background='green')
         style.configure("yellow.Horizontal.TProgressbar", background='yellow')
 
@@ -213,6 +215,11 @@ class ConverterGUI(tk.Tk):
         btns.pack(fill=tk.X)
         ttk.Button(btns, text="Select All", command=self.select_all).pack(side=tk.LEFT)
         ttk.Button(btns, text="Deselect All", command=self.deselect_all).pack(side=tk.LEFT, padx=5)
+        
+        # Add the label to the right of the buttons
+        dropbox_header = ttk.Label(btns, text="SBS Dropbox Upload Status")
+        dropbox_header.pack(side=tk.RIGHT, padx=10)
+
         self.shots_canvas = tk.Canvas(self.shots_frame)
         self.shots_scroll = ttk.Scrollbar(self.shots_frame, orient="vertical", command=self.shots_canvas.yview)
         self.shots_inner = ttk.Frame(self.shots_canvas)
@@ -346,23 +353,32 @@ class ConverterGUI(tk.Tk):
             dropbox_frame = ttk.Frame(shot_frame)
             dropbox_frame.grid(row=0, column=2, sticky=tk.E, padx=10)
 
-            ttk.Label(dropbox_frame, text="☁️").pack(side=tk.LEFT)
-            
-            style_name = ""
             if shot.dropbox_status == "Complete":
-                style_name = "green.Horizontal.TProgressbar"
-            elif shot.dropbox_status == "In Progress":
-                style_name = "yellow.Horizontal.TProgressbar"
+                uploaded_label = ttk.Label(dropbox_frame, text="Uploaded", style="blue.TLabel", cursor="hand2")
+                uploaded_label.pack(side=tk.LEFT)
+                uploaded_label.bind("<Button-1>", lambda e, s=shot: self._copy_dropbox_url(s))
+            else:
+                style_name = ""
+                if shot.dropbox_status == "In Progress":
+                    style_name = "yellow.Horizontal.TProgressbar"
 
-            progress_bar = ttk.Progressbar(dropbox_frame, length=100, value=shot.dropbox_progress * 100, style=style_name)
-            progress_bar.pack(side=tk.LEFT, padx=5)
+                progress_bar = ttk.Progressbar(dropbox_frame, length=100, value=shot.dropbox_progress * 100, style=style_name)
+                progress_bar.pack(side=tk.LEFT, padx=5)
 
-            progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames):04d}/{shot.sbs_frames:04d}"
-            ttk.Label(dropbox_frame, text=progress_text).pack(side=tk.LEFT)
+                progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames):04d}/{shot.sbs_frames:04d}"
+                ttk.Label(dropbox_frame, text=progress_text, style="yellow.TLabel").pack(side=tk.LEFT)
 
             self.shot_vars.append(var)
         if self.shots:
             self.update_preview(self.shots[0])
+
+    def _copy_dropbox_url(self, shot: Shot) -> None:
+        """Copy a placeholder Dropbox URL to the clipboard."""
+        # This is a placeholder. In a real implementation, you would get the URL from the Dropbox API.
+        url = f"https://www.dropbox.com/sh/{shot.name.lower().replace(' ', '-')}/?dl=0"
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        messagebox.showinfo("URL Copied", f"Copied to clipboard:\n{url}")
 
     def select_all(self) -> None:
         for var, shot in zip(self.shot_vars, self.shots):
