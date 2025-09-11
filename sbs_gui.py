@@ -15,6 +15,7 @@ from typing import List
 import urllib.request
 import zipfile
 import platform
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -98,6 +99,8 @@ class Shot:
     sbs_frames: int
     needs_conversion: bool
     conversion_progress: float  # 0.0 to 1.0
+    dropbox_status: str # "Not Started", "In Progress", "Complete"
+    dropbox_progress: float # 0.0 to 1.0
 
 
 def frame_count(path: str) -> int:
@@ -124,7 +127,7 @@ def scan_shots(root: str) -> List[Shot]:
     except FileNotFoundError:
         return shots
     for entry in entries:
-        if not entry.is_dir() or entry.name.startswith('.') or entry.name == '__pycache__':
+        if not entry.is_dir() or entry.name.startswith('.') or entry.name == '__pycache__' or entry.name.endswith("_SBS"):
             continue
         shot_path = entry.path
         frames = frame_count(shot_path)
@@ -140,7 +143,16 @@ def scan_shots(root: str) -> List[Shot]:
         needs_conversion = frames > sbs_frames
         conversion_progress = sbs_frames / frames if frames > 0 else 0.0
         
-        shots.append(Shot(entry.name, shot_path, not needs_conversion, frames, sbs_frames, needs_conversion, conversion_progress))
+        # Placeholder for Dropbox status
+        statuses = ["Not Started", "In Progress", "Complete"]
+        dropbox_status = random.choice(statuses)
+        dropbox_progress = 0.0
+        if dropbox_status == "Complete":
+            dropbox_progress = 1.0
+        elif dropbox_status == "In Progress":
+            dropbox_progress = random.random()
+
+        shots.append(Shot(entry.name, shot_path, not needs_conversion, frames, sbs_frames, needs_conversion, conversion_progress, dropbox_status, dropbox_progress))
     return shots
 
 
@@ -156,6 +168,12 @@ class ConverterGUI(tk.Tk):
         self.thumbnail: tk.PhotoImage | None = None
         self.current_frame: str = ""
         self.scanning = False
+
+        # Custom styles for progress bars
+        style = ttk.Style(self)
+        style.configure("green.Horizontal.TProgressbar", background='green')
+        style.configure("yellow.Horizontal.TProgressbar", background='yellow')
+
         self._build_widgets()
         self.after(100, self.process_queue)
 
@@ -214,6 +232,13 @@ class ConverterGUI(tk.Tk):
         self.preview_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
         self.thumb_label = ttk.Label(self.preview_frame)
         self.thumb_label.pack(pady=5)
+        
+        self.preview_buttons_frame = ttk.Frame(self.preview_frame)
+        self.preview_buttons_frame.pack(pady=5)
+
+        self.shot_details_frame = ttk.LabelFrame(self.preview_frame, text="Shot Details")
+        self.shot_details_frame.pack(fill=tk.X, padx=5, pady=5)
+
         self.layers_list = tk.Listbox(self.preview_frame, height=6)
         self.layers_list.pack(fill=tk.X, pady=5)
         ttk.Button(self.preview_frame, text="Preview Channel", command=self.preview_channel).pack()
@@ -288,6 +313,16 @@ class ConverterGUI(tk.Tk):
         for shot in self.shots:
             var = tk.BooleanVar(value=shot.needs_conversion)
             
+            shot_frame = ttk.Frame(self.shots_inner)
+            shot_frame.pack(fill=tk.X, pady=2)
+            shot_frame.columnconfigure(1, weight=1) # Make the label expand
+
+            cb = ttk.Checkbutton(shot_frame, variable=var)
+            cb.grid(row=0, column=0, padx=(0, 5))
+
+            if not shot.needs_conversion:
+                cb.state(["disabled"])
+
             # Create detailed status label
             if shot.frames == 0:
                 status = "No EXR files"
@@ -302,15 +337,29 @@ class ConverterGUI(tk.Tk):
                 status = "⏳ Not started"
                 color = "red"
             
-            label = f"{shot.name} - {status}"
-            cb = ttk.Checkbutton(self.shots_inner, text=label, variable=var,
-                                 command=lambda s=shot: self.update_preview(s))
+            label_text = f"{shot.name} - {status}"
+            label = ttk.Label(shot_frame, text=label_text, foreground=color, cursor="hand2")
+            label.grid(row=0, column=1, sticky=tk.W)
+            label.bind("<Button-1>", lambda e, s=shot: self.update_preview(s))
+
+            # Dropbox status
+            dropbox_frame = ttk.Frame(shot_frame)
+            dropbox_frame.grid(row=0, column=2, sticky=tk.E, padx=10)
+
+            ttk.Label(dropbox_frame, text="☁️").pack(side=tk.LEFT)
             
-            # Only enable checkbox if conversion is needed
-            if not shot.needs_conversion:
-                cb.state(["disabled"])
-            
-            cb.pack(anchor=tk.W, pady=2)
+            style_name = ""
+            if shot.dropbox_status == "Complete":
+                style_name = "green.Horizontal.TProgressbar"
+            elif shot.dropbox_status == "In Progress":
+                style_name = "yellow.Horizontal.TProgressbar"
+
+            progress_bar = ttk.Progressbar(dropbox_frame, length=100, value=shot.dropbox_progress * 100, style=style_name)
+            progress_bar.pack(side=tk.LEFT, padx=5)
+
+            progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames):04d}/{shot.sbs_frames:04d}"
+            ttk.Label(dropbox_frame, text=progress_text).pack(side=tk.LEFT)
+
             self.shot_vars.append(var)
         if self.shots:
             self.update_preview(self.shots[0])
@@ -478,9 +527,38 @@ class ConverterGUI(tk.Tk):
 
     # Preview -------------------------------------------------------------
     def update_preview(self, shot: Shot) -> None:
+        # Clear previous buttons
+        for widget in self.preview_buttons_frame.winfo_children():
+            widget.destroy()
+
+        # Add new buttons
+        mono_button = ttk.Button(self.preview_buttons_frame, text="Open Mono Folder", command=lambda: self.open_folder(shot.path))
+        mono_button.pack(side=tk.LEFT, padx=5)
+
+        sbs_path = f"{shot.path}_SBS"
+        sbs_button = ttk.Button(self.preview_buttons_frame, text="Open SBS Folder", command=lambda: self.open_folder(sbs_path))
+        sbs_button.pack(side=tk.LEFT, padx=5)
+
+        if not os.path.exists(shot.path):
+            mono_button.config(state=tk.DISABLED)
+        if not os.path.exists(sbs_path):
+            sbs_button.config(state=tk.DISABLED)
+
         frames = self._frame_list(shot.path)
         if not frames:
-            return
+            # Even if there are no frames to convert, we might have a preview
+            source_frames = []
+            try:
+                source_frames = [f for f in sorted(os.listdir(shot.path))
+                                 if f.lower().endswith(".exr") and "_SBS" not in f]
+            except FileNotFoundError:
+                pass # Ignore if folder doesn't exist
+            if not source_frames:
+                self.thumb_label.configure(image=None)
+                self.layers_list.delete(0, tk.END)
+                return
+            frames = source_frames
+
         frame_path = os.path.join(shot.path, frames[0])
         self.current_frame = frame_path
         self.thumbnail = self._make_thumbnail(frame_path)
@@ -490,6 +568,65 @@ class ConverterGUI(tk.Tk):
         self.layers_list.delete(0, tk.END)
         for c in channels:
             self.layers_list.insert(tk.END, c)
+
+        # Update shot details
+        self._update_shot_details(shot, frame_path)
+
+    def _update_shot_details(self, shot: Shot, frame_path: str) -> None:
+        """Update the shot details frame."""
+        for widget in self.shot_details_frame.winfo_children():
+            widget.destroy()
+
+        details = self._get_shot_details(frame_path)
+
+        ttk.Label(self.shot_details_frame, text=f"Frames: {shot.frames}").pack(anchor=tk.W)
+        status = "Complete" if shot.conversion_progress == 1.0 else "Incomplete"
+        ttk.Label(self.shot_details_frame, text=f"Conversion: {status}").pack(anchor=tk.W)
+        
+        if details:
+            ttk.Label(self.shot_details_frame, text=f"Compression: {details.get('compression', 'N/A')}").pack(anchor=tk.W)
+            ttk.Label(self.shot_details_frame, text=f"Resolution: {details.get('resolution', 'N/A')}").pack(anchor=tk.W)
+            ttk.Label(self.shot_details_frame, text=f"File Size: {details.get('filesize', 'N/A')}").pack(anchor=tk.W)
+
+    def open_folder(self, path: str) -> None:
+        """Open a folder in the default file explorer."""
+        if not os.path.exists(path):
+            messagebox.showerror("Folder not found", f"The folder '{path}' does not exist.")
+            return
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", path], check=True)
+            else:  # Linux
+                subprocess.run(["xdg-open", path], check=True)
+        except Exception as e:
+            messagebox.showerror("Failed to open folder", str(e))
+
+    def _get_shot_details(self, frame_path: str) -> dict:
+        """Get details for a shot from oiiotool."""
+        if not self.oiiotool or not os.path.exists(frame_path):
+            return {}
+        try:
+            result = subprocess.run(
+                [self.oiiotool, frame_path, "--info", "-v"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+            output = result.stdout
+            details = {}
+            for line in output.splitlines():
+                if "compression:" in line:
+                    details["compression"] = line.split("compression:")[1].strip().strip('"')
+                if "resolution:" in line:
+                    details["resolution"] = line.split("resolution:")[1].strip()
+                if "file size:" in line:
+                    details["filesize"] = line.split("file size:")[1].strip()
+            return details
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return {}
 
     def _make_thumbnail(self, frame: str) -> tk.PhotoImage | None:
         try:
