@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 import platform
 import random
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -168,10 +169,11 @@ class ConverterGUI(tk.Tk):
         self.thumbnail: tk.PhotoImage | None = None
         self.current_frame: str = ""
         self.scanning = False
+        self.selected_shot_frame: ttk.Frame | None = None
 
         # Custom styles
         style = ttk.Style(self)
-        style.configure("yellow.TLabel", foreground="yellow")
+        style.configure("black.TLabel", foreground="black")
         style.configure("blue.TLabel", foreground="blue")
         style.configure("green.Horizontal.TProgressbar", background='green')
         style.configure("yellow.Horizontal.TProgressbar", background='yellow')
@@ -321,11 +323,12 @@ class ConverterGUI(tk.Tk):
             var = tk.BooleanVar(value=shot.needs_conversion)
             
             shot_frame = ttk.Frame(self.shots_inner)
-            shot_frame.pack(fill=tk.X, pady=2)
-            shot_frame.columnconfigure(1, weight=1) # Make the label expand
+            shot_frame.pack(fill=tk.X, pady=2, padx=5)
+            # Configure the grid columns. Column 1 should expand.
+            shot_frame.columnconfigure(1, weight=1)
 
             cb = ttk.Checkbutton(shot_frame, variable=var)
-            cb.grid(row=0, column=0, padx=(0, 5))
+            cb.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
             if not shot.needs_conversion:
                 cb.state(["disabled"])
@@ -347,38 +350,35 @@ class ConverterGUI(tk.Tk):
             label_text = f"{shot.name} - {status}"
             label = ttk.Label(shot_frame, text=label_text, foreground=color, cursor="hand2")
             label.grid(row=0, column=1, sticky=tk.W)
-            label.bind("<Button-1>", lambda e, s=shot: self.update_preview(s))
 
             # Dropbox status
-            dropbox_frame = ttk.Frame(shot_frame)
-            dropbox_frame.grid(row=0, column=2, sticky=tk.E, padx=10)
-
             if shot.dropbox_status == "Complete":
-                uploaded_label = ttk.Label(dropbox_frame, text="Uploaded", style="blue.TLabel", cursor="hand2")
-                uploaded_label.pack(side=tk.LEFT)
-                uploaded_label.bind("<Button-1>", lambda e, s=shot: self._copy_dropbox_url(s))
+                progress_text = f"{shot.sbs_frames}/{shot.sbs_frames}"
+                style = "blue.TLabel"
             else:
-                style_name = ""
-                if shot.dropbox_status == "In Progress":
-                    style_name = "yellow.Horizontal.TProgressbar"
-
-                progress_bar = ttk.Progressbar(dropbox_frame, length=100, value=shot.dropbox_progress * 100, style=style_name)
-                progress_bar.pack(side=tk.LEFT, padx=5)
-
-                progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames):04d}/{shot.sbs_frames:04d}"
-                ttk.Label(dropbox_frame, text=progress_text, style="yellow.TLabel").pack(side=tk.LEFT)
+                progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames)}/{shot.sbs_frames}"
+                style = "black.TLabel"
+            
+            status_label = ttk.Label(shot_frame, text=progress_text, style=style)
+            status_label.grid(row=0, column=2, sticky=tk.E, padx=10)
+            
+            # Bind click event to the frame, label, and checkbox
+            widgets = [shot_frame, label, cb, status_label]
+            for widget in widgets:
+                widget.bind("<Button-1>", lambda e, s=shot, sf=shot_frame: self._on_shot_select(s, sf))
 
             self.shot_vars.append(var)
         if self.shots:
             self.update_preview(self.shots[0])
 
-    def _copy_dropbox_url(self, shot: Shot) -> None:
-        """Copy a placeholder Dropbox URL to the clipboard."""
+    def _open_dropbox_url(self, shot: Shot) -> None:
+        """Open a placeholder Dropbox URL in the default web browser."""
         # This is a placeholder. In a real implementation, you would get the URL from the Dropbox API.
         url = f"https://www.dropbox.com/sh/{shot.name.lower().replace(' ', '-')}/?dl=0"
-        self.clipboard_clear()
-        self.clipboard_append(url)
-        messagebox.showinfo("URL Copied", f"Copied to clipboard:\n{url}")
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Failed to open URL", f"Could not open the URL:\n{url}\n\nError: {e}")
 
     def select_all(self) -> None:
         for var, shot in zip(self.shot_vars, self.shots):
@@ -541,8 +541,30 @@ class ConverterGUI(tk.Tk):
     def _frame_count(self, path: str) -> int:
         return len(self._frame_list(path))
 
+    def _on_shot_select(self, shot: Shot, shot_frame: ttk.Frame) -> None:
+        """Handle shot selection, showing a loading state."""
+        if self.selected_shot_frame:
+            self.selected_shot_frame.config(relief=tk.FLAT)
+        
+        shot_frame.config(relief=tk.GROOVE, borderwidth=2)
+        self.selected_shot_frame = shot_frame
+        
+        # Show loading indicator
+        self.thumb_label.configure(image=None)
+        self.thumb_label.config(text="Loading...")
+        self.layers_list.delete(0, tk.END)
+        
+        # Update preview in a separate thread to avoid blocking the GUI
+        threading.Thread(
+            target=self.update_preview,
+            args=(shot,),
+            daemon=True,
+        ).start()
+
     # Preview -------------------------------------------------------------
     def update_preview(self, shot: Shot) -> None:
+        # This now runs in a background thread, so GUI updates must be queued
+        
         # Clear previous buttons
         for widget in self.preview_buttons_frame.winfo_children():
             widget.destroy()
@@ -554,6 +576,9 @@ class ConverterGUI(tk.Tk):
         sbs_path = f"{shot.path}_SBS"
         sbs_button = ttk.Button(self.preview_buttons_frame, text="Open SBS Folder", command=lambda: self.open_folder(sbs_path))
         sbs_button.pack(side=tk.LEFT, padx=5)
+        
+        dropbox_button = ttk.Button(self.preview_buttons_frame, text="Dropbox", command=lambda: self._open_dropbox_url(shot))
+        dropbox_button.pack(side=tk.LEFT, padx=5)
 
         if not os.path.exists(shot.path):
             mono_button.config(state=tk.DISABLED)
@@ -570,17 +595,27 @@ class ConverterGUI(tk.Tk):
             except FileNotFoundError:
                 pass # Ignore if folder doesn't exist
             if not source_frames:
-                self.thumb_label.configure(image=None)
-                self.layers_list.delete(0, tk.END)
+                self.queue.put(("preview_update", None, [], shot, ""))
                 return
             frames = source_frames
 
         frame_path = os.path.join(shot.path, frames[0])
-        self.current_frame = frame_path
-        self.thumbnail = self._make_thumbnail(frame_path)
-        if self.thumbnail:
-            self.thumb_label.configure(image=self.thumbnail)
+        thumbnail = self._make_thumbnail(frame_path)
         channels = self._get_channels(frame_path)
+        
+        self.queue.put(("preview_update", thumbnail, channels, shot, frame_path))
+        
+    def _update_preview_ui(self, thumbnail, channels, shot, frame_path):
+        """Update the preview UI from the main thread."""
+        self.current_frame = frame_path
+        self.thumb_label.config(text="") # Clear loading text
+        if thumbnail:
+            self.thumbnail = thumbnail
+            self.thumb_label.configure(image=self.thumbnail)
+        else:
+            self.thumb_label.configure(image=None)
+            self.thumb_label.config(text="Preview not available")
+
         self.layers_list.delete(0, tk.END)
         for c in channels:
             self.layers_list.insert(tk.END, c)
@@ -784,6 +819,9 @@ class ConverterGUI(tk.Tk):
                         self.cpu_label.config(text=f"CPU: {percent:.0f}%")
                 elif msg[0] == "done":
                     self.convert_btn.config(state=tk.NORMAL)
+                elif msg[0] == "preview_update":
+                    _, thumbnail, channels, shot, frame_path = msg
+                    self._update_preview_ui(thumbnail, channels, shot, frame_path)
         except queue.Empty:
             pass
         self.after(100, self.process_queue)
