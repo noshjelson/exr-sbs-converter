@@ -141,67 +141,55 @@ def save_shot_statuses(root: str, statuses: Dict[str, dict]) -> None:
     with open(status_file, "w") as f:
         json.dump(statuses, f, indent=4)
 
-def scan_shots(root: str) -> List[Shot]:
-    """Scan for shots and update statuses from the JSON file."""
-    shots: List[Shot] = []
+def scan_shots(root: str, ready_for_comp_path: str) -> List[Shot]:
+    """Scan for shots in both source and comp folders, using the filesystem as the source of truth."""
+    shots_map: Dict[str, Shot] = {}
     statuses = load_shot_statuses(root)
-    
-    # First, add all shots that are marked as moved but still in the status file
-    for name, status in statuses.items():
-        if status.get("is_moved"):
-            shots.append(Shot(
-                name=name,
-                path=status.get("path", ""),
-                has_sbs=True,
-                frames=status.get("frames", 0),
-                sbs_frames=status.get("sbs_frames", 0),
-                needs_conversion=False,
-                conversion_progress=1.0,
-                dropbox_status="Complete",
-                dropbox_progress=1.0,
-                is_moved=True,
-                moved_path=status.get("moved_path", "")
-            ))
 
+    # 1. Scan the source directory for monoscopic shots
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except FileNotFoundError:
-        return shots # Return moved shots if the folder is gone
+        entries = []
 
     for entry in entries:
         if not entry.is_dir() or entry.name.startswith('.') or entry.name == '__pycache__' or entry.name.endswith("_SBS"):
             continue
-        
+
+        shot_name = entry.name
         shot_path = entry.path
         frames = frame_count(shot_path)
-        sbs_path = f"{shot_path}_SBS"
-        sbs_frames = sbs_frame_count(sbs_path)
-        has_sbs = sbs_frames > 0
-        if not has_sbs:
-            sbs_frames = len([f for f in os.listdir(shot_path)
-                              if f.lower().endswith(".exr") and "_SBS" in f])
-            has_sbs = sbs_frames > 0
         
+        # Filesystem is the source of truth for 'is_moved'
+        source_sbs_path = f"{shot_path}_SBS"
+        comp_sbs_path = os.path.join(ready_for_comp_path, f"{shot_name}_SBS")
+        
+        sbs_frames = 0
+        is_moved = False
+        if os.path.exists(comp_sbs_path):
+            sbs_frames = sbs_frame_count(comp_sbs_path)
+            is_moved = True
+        elif os.path.exists(source_sbs_path):
+            sbs_frames = sbs_frame_count(source_sbs_path)
+            is_moved = False
+
+        shot_status = statuses.get(shot_name, {})
+        shot_status['is_moved'] = is_moved  # Update status based on filesystem reality
+
         needs_conversion = frames > sbs_frames
         conversion_progress = sbs_frames / frames if frames > 0 else 0.0
         
-        # Get status from the loaded JSON data, or use defaults
-        shot_status = statuses.get(entry.name, {})
         dropbox_status = shot_status.get("dropbox_status", "Not Started")
         dropbox_progress = shot_status.get("dropbox_progress", 0.0)
 
-        # Update status if it's complete
         if conversion_progress == 1.0 and dropbox_status != "Complete":
-            # This is a placeholder for a real Dropbox check
-            statuses.setdefault(entry.name, {}).update({
-                "dropbox_status": "Complete",
-                "dropbox_progress": 1.0
-            })
+            shot_status["dropbox_status"] = "Complete"
+            shot_status["dropbox_progress"] = 1.0
             dropbox_status = "Complete"
             dropbox_progress = 1.0
 
-        shots.append(Shot(
-            name=entry.name,
+        shots_map[shot_name] = Shot(
+            name=shot_name,
             path=shot_path,
             has_sbs=not needs_conversion,
             frames=frames,
@@ -209,19 +197,40 @@ def scan_shots(root: str) -> List[Shot]:
             needs_conversion=needs_conversion,
             conversion_progress=conversion_progress,
             dropbox_status=dropbox_status,
-            dropbox_progress=dropbox_progress
-        ))
+            dropbox_progress=dropbox_progress,
+            is_moved=is_moved,
+            moved_path=ready_for_comp_path if is_moved else ""
+        )
 
-        # Update the statuses dict to be saved later
-        statuses.setdefault(entry.name, {}).update({
+        shot_status.update({
             "path": shot_path,
             "frames": frames,
             "sbs_frames": sbs_frames,
-            "is_moved": False
         })
+        statuses[shot_name] = shot_status
+
+    # 2. Add shots that are only in the status file (e.g., folder deleted from source)
+    for name, status in statuses.items():
+        if name not in shots_map and status.get("is_moved"):
+            # Verify it's still in the comp folder, otherwise it's just gone
+            comp_sbs_path = os.path.join(ready_for_comp_path, f"{name}_SBS")
+            if os.path.exists(comp_sbs_path):
+                shots_map[name] = Shot(
+                    name=name,
+                    path=status.get("path", ""), # Path might be stale, but it's all we have
+                    has_sbs=True,
+                    frames=status.get("frames", 0),
+                    sbs_frames=status.get("sbs_frames", 0),
+                    needs_conversion=False,
+                    conversion_progress=1.0,
+                    dropbox_status="Complete",
+                    dropbox_progress=1.0,
+                    is_moved=True,
+                    moved_path=status.get("moved_path", ready_for_comp_path)
+                )
 
     save_shot_statuses(root, statuses)
-    return sorted(shots, key=lambda s: s.name)
+    return sorted(shots_map.values(), key=lambda s: s.name)
 
 
 class ConverterGUI(tk.Tk):
@@ -332,6 +341,8 @@ class ConverterGUI(tk.Tk):
         self.convert_btn = ttk.Button(controls, text="Convert Selected", command=self.start_convert)
         self.convert_btn.pack(side=tk.LEFT)
         ttk.Button(controls, text="Convert Single Frame", command=self.convert_single).pack(side=tk.LEFT, padx=5)
+        self.move_selected_btn = ttk.Button(controls, text="Move Selected to Comp", command=self.move_selected_to_comp)
+        self.move_selected_btn.pack(side=tk.LEFT, padx=5)
 
         prog = ttk.Frame(self)
         prog.pack(fill=tk.X, padx=10, pady=5)
@@ -377,15 +388,16 @@ class ConverterGUI(tk.Tk):
         """Load folder from a specific path (used by refresh)."""
         self.current_folder = folder
         self.queue.put(("scan_started",))
+        comp_folder = self.ready_for_comp_path.get()
         threading.Thread(
             target=self._scan_worker,
-            args=(folder,),
+            args=(folder, comp_folder),
             daemon=True,
         ).start()
 
-    def _scan_worker(self, folder: str) -> None:
+    def _scan_worker(self, folder: str, comp_folder: str) -> None:
         """Scan for shots in a background thread."""
-        shots = scan_shots(folder)
+        shots = scan_shots(folder, comp_folder)
         self.queue.put(("scan_finished", shots))
 
     def _update_shot_list(self, shots: List[Shot]) -> None:
@@ -411,7 +423,7 @@ class ConverterGUI(tk.Tk):
             cb = ttk.Checkbutton(shot_frame, variable=var)
             cb.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-            if not shot.needs_conversion or shot.is_moved:
+            if shot.is_moved:
                 cb.state(["disabled"])
 
             # Create detailed status label
@@ -487,6 +499,49 @@ class ConverterGUI(tk.Tk):
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def move_selected_to_comp(self) -> None:
+        """Move all selected and eligible shots to the 'Ready for Comp' folder."""
+        selected = [s for s, v in zip(self.shots, self.shot_vars) if v.get()]
+        eligible = [s for s in selected if not s.is_moved and not s.needs_conversion and s.dropbox_status == "Complete"]
+        
+        if not eligible:
+            messagebox.showinfo("Nothing to Move", "No selected shots are ready to be moved.\nA shot must be fully converted and uploaded.")
+            return
+
+        confirm = messagebox.askyesno("Confirm Move", f"Are you sure you want to move {len(eligible)} shot(s) to the 'Ready for Comp' folder?")
+        if not confirm:
+            return
+
+        threading.Thread(
+            target=self._move_multiple_worker,
+            args=(eligible,),
+            daemon=True,
+        ).start()
+
+    def _move_multiple_worker(self, shots: List[Shot]) -> None:
+        """Worker thread to move multiple shots."""
+        for shot in shots:
+            self.queue.put(("log", f"Moving {shot.name}_SBS..."))
+            dest_folder = self.ready_for_comp_path.get()
+            shot_sbs_path = f"{shot.path}_SBS"
+            dest_sbs_path = os.path.join(dest_folder, f"{shot.name}_SBS")
+
+            if not os.path.exists(shot_sbs_path) or os.path.exists(dest_sbs_path):
+                self.queue.put(("log", f"Skipping {shot.name}_SBS (source missing or destination exists)."))
+                continue
+            
+            try:
+                shutil.move(shot_sbs_path, dest_sbs_path)
+                statuses = load_shot_statuses(self.current_folder)
+                statuses.setdefault(shot.name, {}).update({"is_moved": True, "moved_path": dest_folder})
+                save_shot_statuses(self.current_folder, statuses)
+                self.queue.put(("log", f"Successfully moved {shot.name}_SBS."))
+            except Exception as e:
+                self.queue.put(("log", f"Failed to move {shot.name}_SBS: {e}"))
+        
+        self.queue.put(("log", "All moves complete."))
+        self.queue.put(("refresh_request",))
 
     # Cleanup ------------------------------------------------------------
     def _periodic_cleanup(self) -> None:
@@ -649,6 +704,28 @@ class ConverterGUI(tk.Tk):
         self.queue.put(("log", "🎉 All conversions complete!"))
         self.queue.put(("done",))
 
+        # Auto-move completed shots
+        self.queue.put(("log", "Checking for completed shots to auto-move..."))
+        statuses = load_shot_statuses(self.current_folder)
+        shots_to_move = []
+        for shot in shots:
+            shot_status = statuses.get(shot.name, {})
+            # Refresh shot data from disk/status file
+            sbs_frames = sbs_frame_count(f"{shot.path}_SBS")
+            frames = frame_count(shot.path)
+            
+            if sbs_frames == frames and shot_status.get("dropbox_status") == "Complete":
+                if not shot_status.get("is_moved"):
+                    shots_to_move.append(shot)
+
+        if shots_to_move:
+            self.queue.put(("log", f"Found {len(shots_to_move)} shots to move automatically."))
+            self._move_multiple_worker(shots_to_move)
+        else:
+            self.queue.put(("log", "No shots ready for automatic moving."))
+        
+        self.queue.put(("refresh_request",))
+
     def _frame_list(self, path: str) -> List[str]:
         """Get list of frames that need conversion (skip already converted ones)."""
         source_frames = [f for f in sorted(os.listdir(path))
@@ -699,11 +776,8 @@ class ConverterGUI(tk.Tk):
             widget.destroy()
 
         # Determine the correct paths based on whether the shot is moved
-        mono_path = shot.moved_path if shot.is_moved else shot.path
-        if shot.is_moved:
-            mono_path = os.path.join(shot.moved_path, shot.name)
-
-        sbs_path = f"{mono_path}_SBS"
+        mono_path = shot.path
+        sbs_path = os.path.join(shot.moved_path, f"{shot.name}_SBS") if shot.is_moved else f"{shot.path}_SBS"
 
         # Add new buttons
         mono_button = ttk.Button(self.preview_buttons_frame, text="Open Mono Folder", command=lambda: self.open_folder(mono_path))
@@ -750,36 +824,35 @@ class ConverterGUI(tk.Tk):
         self.queue.put(("preview_update", thumbnail, channels, shot, frame_path))
         
     def _move_shot_to_comp(self, shot: Shot) -> None:
-        """Move the shot folder and its SBS folder to the 'Ready for Comp' directory."""
+        """Move the shot's SBS folder to the 'Ready for Comp' directory."""
         dest_folder = self.ready_for_comp_path.get()
         if not os.path.isdir(dest_folder):
             messagebox.showerror("Invalid Destination", f"The folder '{dest_folder}' does not exist.")
             return
 
         shot_sbs_path = f"{shot.path}_SBS"
-        dest_shot_path = os.path.join(dest_folder, shot.name)
         dest_sbs_path = os.path.join(dest_folder, f"{shot.name}_SBS")
 
-        if os.path.exists(dest_shot_path) or os.path.exists(dest_sbs_path):
-            messagebox.showerror("Destination Exists", "A folder for this shot already exists in the destination.")
+        if not os.path.exists(shot_sbs_path):
+            messagebox.showerror("Source Missing", f"The source folder '{shot_sbs_path}' does not exist.")
+            return
+
+        if os.path.exists(dest_sbs_path):
+            messagebox.showerror("Destination Exists", "An SBS folder for this shot already exists in the destination.")
             return
 
         try:
-            # Move both the original and the SBS folder
-            shutil.move(shot.path, dest_shot_path)
-            if os.path.exists(shot_sbs_path):
-                shutil.move(shot_sbs_path, dest_sbs_path)
+            shutil.move(shot_sbs_path, dest_sbs_path)
 
             # Update the status file
             statuses = load_shot_statuses(self.current_folder)
             statuses.setdefault(shot.name, {}).update({
                 "is_moved": True,
                 "moved_path": dest_folder,
-                "path": dest_shot_path # Update path to new location
             })
             save_shot_statuses(self.current_folder, statuses)
 
-            messagebox.showinfo("Move Complete", f"Moved '{shot.name}' to '{dest_folder}'.")
+            messagebox.showinfo("Move Complete", f"Moved '{shot.name}_SBS' to '{dest_folder}'.")
             self.refresh_folder()
 
         except Exception as e:
@@ -1016,6 +1089,8 @@ class ConverterGUI(tk.Tk):
                 elif msg[0] == "preview_update":
                     _, thumbnail, channels, shot, frame_path = msg
                     self._update_preview_ui(thumbnail, channels, shot, frame_path)
+                elif msg[0] == "refresh_request":
+                    self.refresh_folder()
         except queue.Empty:
             pass
         self.after(100, self.process_queue)
