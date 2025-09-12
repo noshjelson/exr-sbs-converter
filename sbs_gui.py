@@ -11,10 +11,11 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict
 import urllib.request
 import zipfile
 import platform
+import json
 import random
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -102,6 +103,8 @@ class Shot:
     conversion_progress: float  # 0.0 to 1.0
     dropbox_status: str # "Not Started", "In Progress", "Complete"
     dropbox_progress: float # 0.0 to 1.0
+    is_moved: bool = False
+    moved_path: str = ""
 
 
 def frame_count(path: str) -> int:
@@ -121,15 +124,54 @@ def sbs_frame_count(path: str) -> int:
         return 0
 
 
+def load_shot_statuses(root: str) -> Dict[str, dict]:
+    """Load shot statuses from .shot_status.json."""
+    status_file = os.path.join(root, ".shot_status.json")
+    if os.path.exists(status_file):
+        with open(status_file, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+def save_shot_statuses(root: str, statuses: Dict[str, dict]) -> None:
+    """Save shot statuses to .shot_status.json."""
+    status_file = os.path.join(root, ".shot_status.json")
+    with open(status_file, "w") as f:
+        json.dump(statuses, f, indent=4)
+
 def scan_shots(root: str) -> List[Shot]:
+    """Scan for shots and update statuses from the JSON file."""
     shots: List[Shot] = []
+    statuses = load_shot_statuses(root)
+    
+    # First, add all shots that are marked as moved but still in the status file
+    for name, status in statuses.items():
+        if status.get("is_moved"):
+            shots.append(Shot(
+                name=name,
+                path=status.get("path", ""),
+                has_sbs=True,
+                frames=status.get("frames", 0),
+                sbs_frames=status.get("sbs_frames", 0),
+                needs_conversion=False,
+                conversion_progress=1.0,
+                dropbox_status="Complete",
+                dropbox_progress=1.0,
+                is_moved=True,
+                moved_path=status.get("moved_path", "")
+            ))
+
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except FileNotFoundError:
-        return shots
+        return shots # Return moved shots if the folder is gone
+
     for entry in entries:
         if not entry.is_dir() or entry.name.startswith('.') or entry.name == '__pycache__' or entry.name.endswith("_SBS"):
             continue
+        
         shot_path = entry.path
         frames = frame_count(shot_path)
         sbs_path = f"{shot_path}_SBS"
@@ -140,21 +182,46 @@ def scan_shots(root: str) -> List[Shot]:
                               if f.lower().endswith(".exr") and "_SBS" in f])
             has_sbs = sbs_frames > 0
         
-        # Calculate conversion progress
         needs_conversion = frames > sbs_frames
         conversion_progress = sbs_frames / frames if frames > 0 else 0.0
         
-        # Placeholder for Dropbox status
-        statuses = ["Not Started", "In Progress", "Complete"]
-        dropbox_status = random.choice(statuses)
-        dropbox_progress = 0.0
-        if dropbox_status == "Complete":
-            dropbox_progress = 1.0
-        elif dropbox_status == "In Progress":
-            dropbox_progress = random.random()
+        # Get status from the loaded JSON data, or use defaults
+        shot_status = statuses.get(entry.name, {})
+        dropbox_status = shot_status.get("dropbox_status", "Not Started")
+        dropbox_progress = shot_status.get("dropbox_progress", 0.0)
 
-        shots.append(Shot(entry.name, shot_path, not needs_conversion, frames, sbs_frames, needs_conversion, conversion_progress, dropbox_status, dropbox_progress))
-    return shots
+        # Update status if it's complete
+        if conversion_progress == 1.0 and dropbox_status != "Complete":
+            # This is a placeholder for a real Dropbox check
+            statuses.setdefault(entry.name, {}).update({
+                "dropbox_status": "Complete",
+                "dropbox_progress": 1.0
+            })
+            dropbox_status = "Complete"
+            dropbox_progress = 1.0
+
+        shots.append(Shot(
+            name=entry.name,
+            path=shot_path,
+            has_sbs=not needs_conversion,
+            frames=frames,
+            sbs_frames=sbs_frames,
+            needs_conversion=needs_conversion,
+            conversion_progress=conversion_progress,
+            dropbox_status=dropbox_status,
+            dropbox_progress=dropbox_progress
+        ))
+
+        # Update the statuses dict to be saved later
+        statuses.setdefault(entry.name, {}).update({
+            "path": shot_path,
+            "frames": frames,
+            "sbs_frames": sbs_frames,
+            "is_moved": False
+        })
+
+    save_shot_statuses(root, statuses)
+    return sorted(shots, key=lambda s: s.name)
 
 
 class ConverterGUI(tk.Tk):
@@ -170,6 +237,7 @@ class ConverterGUI(tk.Tk):
         self.current_frame: str = ""
         self.scanning = False
         self.selected_shot_frame: ttk.Frame | None = None
+        self.ready_for_comp_path = tk.StringVar(value=r"D:\Boona Dropbox\Boona Slate\01_Active\Silver_SIL_JUL25_BS-144\Production\Output\Silver - Renders\Unreal Renders\ReadyForComp")
 
         # Custom styles
         style = ttk.Style(self)
@@ -190,6 +258,12 @@ class ConverterGUI(tk.Tk):
         self.load_folder_btn.pack(side=tk.LEFT)
         self.refresh_btn = ttk.Button(top, text="🔄 Refresh", command=self.refresh_folder)
         self.refresh_btn.pack(side=tk.LEFT, padx=5)
+
+        # Ready for Comp folder selection
+        comp_frame = ttk.Frame(top)
+        comp_frame.pack(side=tk.LEFT, padx=10)
+        ttk.Button(comp_frame, text="Set 'Ready For Comp' Folder", command=self.select_ready_for_comp_folder).pack(side=tk.LEFT)
+        ttk.Label(comp_frame, textvariable=self.ready_for_comp_path, foreground="gray").pack(side=tk.LEFT, padx=5)
 
         opts = ttk.Frame(self)
         opts.pack(fill=tk.X, padx=10, pady=5)
@@ -287,6 +361,11 @@ class ConverterGUI(tk.Tk):
             return
         self.load_folder_from_path(folder)
 
+    def select_ready_for_comp_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Select 'Ready For Comp' Folder")
+        if folder:
+            self.ready_for_comp_path.set(folder)
+
     def refresh_folder(self) -> None:
         """Refresh the current folder to update conversion status."""
         if not hasattr(self, 'current_folder') or not self.current_folder:
@@ -312,6 +391,7 @@ class ConverterGUI(tk.Tk):
     def _update_shot_list(self, shots: List[Shot]) -> None:
         """Update the UI with the list of shots."""
         self.shots = shots
+        self.selected_shot_frame = None # Reset selected frame
         for child in self.shots_inner.winfo_children():
             child.destroy()
         self.shots_canvas.yview_moveto(0)
@@ -331,11 +411,14 @@ class ConverterGUI(tk.Tk):
             cb = ttk.Checkbutton(shot_frame, variable=var)
             cb.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-            if not shot.needs_conversion:
+            if not shot.needs_conversion or shot.is_moved:
                 cb.state(["disabled"])
 
             # Create detailed status label
-            if shot.frames == 0:
+            if shot.is_moved:
+                status = "✅ Moved to Comp"
+                color = "blue"
+            elif shot.frames == 0:
                 status = "No EXR files"
                 color = "gray"
             elif shot.conversion_progress == 1.0:
@@ -355,7 +438,7 @@ class ConverterGUI(tk.Tk):
             # Dropbox status
             if shot.dropbox_status == "Complete":
                 progress_text = f"{shot.sbs_frames}/{shot.sbs_frames}"
-                style = "blue.TLabel"
+                style = "blue.TLabel" if shot.is_moved else "black.TLabel"
             else:
                 progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames)}/{shot.sbs_frames}"
                 style = "black.TLabel"
@@ -615,21 +698,36 @@ class ConverterGUI(tk.Tk):
         for widget in self.preview_buttons_frame.winfo_children():
             widget.destroy()
 
+        # Determine the correct paths based on whether the shot is moved
+        mono_path = shot.moved_path if shot.is_moved else shot.path
+        if shot.is_moved:
+            mono_path = os.path.join(shot.moved_path, shot.name)
+
+        sbs_path = f"{mono_path}_SBS"
+
         # Add new buttons
-        mono_button = ttk.Button(self.preview_buttons_frame, text="Open Mono Folder", command=lambda: self.open_folder(shot.path))
+        mono_button = ttk.Button(self.preview_buttons_frame, text="Open Mono Folder", command=lambda: self.open_folder(mono_path))
         mono_button.pack(side=tk.LEFT, padx=5)
 
-        sbs_path = f"{shot.path}_SBS"
         sbs_button = ttk.Button(self.preview_buttons_frame, text="Open SBS Folder", command=lambda: self.open_folder(sbs_path))
         sbs_button.pack(side=tk.LEFT, padx=5)
         
         dropbox_button = ttk.Button(self.preview_buttons_frame, text="Dropbox", command=lambda: self._open_dropbox_url(shot))
         dropbox_button.pack(side=tk.LEFT, padx=5)
 
-        if not os.path.exists(shot.path):
+        move_button = ttk.Button(self.preview_buttons_frame, text="Move to Ready for Comp", command=lambda: self._move_shot_to_comp(shot))
+        move_button.pack(side=tk.LEFT, padx=5)
+        if shot.is_moved or shot.needs_conversion or shot.dropbox_status != "Complete":
+            move_button.config(state=tk.DISABLED)
+
+        if not os.path.exists(mono_path):
             mono_button.config(state=tk.DISABLED)
         if not os.path.exists(sbs_path):
             sbs_button.config(state=tk.DISABLED)
+
+        if shot.is_moved:
+            self.queue.put(("preview_update", None, [], shot, ""))
+            return
 
         frames = self._frame_list(shot.path)
         if not frames:
@@ -651,10 +749,54 @@ class ConverterGUI(tk.Tk):
         
         self.queue.put(("preview_update", thumbnail, channels, shot, frame_path))
         
+    def _move_shot_to_comp(self, shot: Shot) -> None:
+        """Move the shot folder and its SBS folder to the 'Ready for Comp' directory."""
+        dest_folder = self.ready_for_comp_path.get()
+        if not os.path.isdir(dest_folder):
+            messagebox.showerror("Invalid Destination", f"The folder '{dest_folder}' does not exist.")
+            return
+
+        shot_sbs_path = f"{shot.path}_SBS"
+        dest_shot_path = os.path.join(dest_folder, shot.name)
+        dest_sbs_path = os.path.join(dest_folder, f"{shot.name}_SBS")
+
+        if os.path.exists(dest_shot_path) or os.path.exists(dest_sbs_path):
+            messagebox.showerror("Destination Exists", "A folder for this shot already exists in the destination.")
+            return
+
+        try:
+            # Move both the original and the SBS folder
+            shutil.move(shot.path, dest_shot_path)
+            if os.path.exists(shot_sbs_path):
+                shutil.move(shot_sbs_path, dest_sbs_path)
+
+            # Update the status file
+            statuses = load_shot_statuses(self.current_folder)
+            statuses.setdefault(shot.name, {}).update({
+                "is_moved": True,
+                "moved_path": dest_folder,
+                "path": dest_shot_path # Update path to new location
+            })
+            save_shot_statuses(self.current_folder, statuses)
+
+            messagebox.showinfo("Move Complete", f"Moved '{shot.name}' to '{dest_folder}'.")
+            self.refresh_folder()
+
+        except Exception as e:
+            messagebox.showerror("Move Failed", f"An error occurred while moving the shot: {e}")
+
     def _update_preview_ui(self, thumbnail, channels, shot, frame_path):
         """Update the preview UI from the main thread."""
         self.current_frame = frame_path
         self.thumb_label.config(text="") # Clear loading text
+        
+        if shot.is_moved:
+            self.thumb_label.configure(image=None)
+            self.thumb_label.config(text="Shot has been moved.")
+            self.layers_list.delete(0, tk.END)
+            self._update_shot_details(shot, "")
+            return
+
         if thumbnail:
             self.thumbnail = thumbnail
             self.thumb_label.configure(image=self.thumbnail)
@@ -674,12 +816,18 @@ class ConverterGUI(tk.Tk):
         for widget in self.shot_details_frame.winfo_children():
             widget.destroy()
 
-        details = self._get_shot_details(frame_path)
-
         ttk.Label(self.shot_details_frame, text=f"Frames: {shot.frames}").pack(anchor=tk.W)
+        
+        if shot.is_moved:
+            status = "Moved to Comp"
+            ttk.Label(self.shot_details_frame, text=f"Status: {status}").pack(anchor=tk.W)
+            ttk.Label(self.shot_details_frame, text=f"Location: {shot.moved_path}").pack(anchor=tk.W)
+            return
+
         status = "Complete" if shot.conversion_progress == 1.0 else "Incomplete"
         ttk.Label(self.shot_details_frame, text=f"Conversion: {status}").pack(anchor=tk.W)
         
+        details = self._get_shot_details(frame_path)
         if details:
             ttk.Label(self.shot_details_frame, text=f"Compression: {details.get('compression', 'N/A')}").pack(anchor=tk.W)
             ttk.Label(self.shot_details_frame, text=f"Resolution: {details.get('resolution', 'N/A')}").pack(anchor=tk.W)
