@@ -247,6 +247,8 @@ class ConverterGUI(tk.Tk):
         self.scanning = False
         self.selected_shot_frame: ttk.Frame | None = None
         self.ready_for_comp_path = tk.StringVar(value=r"D:\Boona Dropbox\Boona Slate\01_Active\Silver_SIL_JUL25_BS-144\Production\Output\Silver - Renders\Unreal Renders\ReadyForComp")
+        self.live_mode_thread = None
+        self.shot_last_activity: Dict[str, float] = {}
 
         # Custom styles
         style = ttk.Style(self)
@@ -292,6 +294,20 @@ class ConverterGUI(tk.Tk):
         ttk.Label(opts, text="Max Parallel Jobs:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
         self.max_workers = tk.IntVar(value=os.cpu_count() or 4)
         ttk.Spinbox(opts, from_=1, to=os.cpu_count() or 32, textvariable=self.max_workers).grid(row=0, column=3, sticky=tk.W)
+
+        # Live Mode Controls
+        live_frame = ttk.Frame(opts)
+        live_frame.grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=(10, 0))
+        self.live_mode_active = tk.BooleanVar(value=False)
+        ttk.Checkbutton(live_frame, text="Live Mode", variable=self.live_mode_active, command=self._toggle_live_mode).pack(side=tk.LEFT)
+        
+        ttk.Label(live_frame, text="Min Delay (s):").pack(side=tk.LEFT, padx=(10, 0))
+        self.min_delay = tk.IntVar(value=30)
+        ttk.Spinbox(live_frame, from_=5, to=3600, textvariable=self.min_delay, width=5).pack(side=tk.LEFT)
+
+        ttk.Label(live_frame, text="Frame Time x").pack(side=tk.LEFT, padx=(10, 0))
+        self.frame_time_multiplier = tk.IntVar(value=5)
+        ttk.Spinbox(live_frame, from_=2, to=20, textvariable=self.frame_time_multiplier, width=4).pack(side=tk.LEFT)
 
         content = ttk.Frame(self)
         content.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -499,6 +515,86 @@ class ConverterGUI(tk.Tk):
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _toggle_live_mode(self) -> None:
+        """Start or stop the live mode worker thread."""
+        if self.live_mode_active.get():
+            self.queue.put(("log", "🟢 Live mode enabled."))
+            # Disable manual controls that could interfere
+            self.convert_btn.config(state=tk.DISABLED)
+            self.move_selected_btn.config(state=tk.DISABLED)
+
+            self.live_mode_thread = threading.Thread(
+                target=self._live_mode_worker,
+                daemon=True
+            )
+            self.live_mode_thread.start()
+        else:
+            self.queue.put(("log", "🔴 Live mode disabled."))
+            # Re-enable manual controls
+            self.convert_btn.config(state=tk.NORMAL)
+            self.move_selected_btn.config(state=tk.NORMAL)
+
+    def _live_mode_worker(self) -> None:
+        """Periodically triggers a folder refresh when in live mode."""
+        while self.live_mode_active.get():
+            if hasattr(self, 'current_folder') and self.current_folder and not self.scanning:
+                self.refresh_folder()
+            
+            time.sleep(15) # Wait 15 seconds before the next scan
+
+    def _handle_auto_processing(self, shots: List[Shot]) -> None:
+        """Automatically convert and move shots based on their status and render activity."""
+        if not self.live_mode_active.get():
+            return
+
+        # --- Auto Conversion ---
+        is_converting = self.convert_btn.cget('state') == tk.DISABLED
+        if not is_converting:
+            shots_to_convert = [s for s in shots if s.needs_conversion]
+            if shots_to_convert:
+                self.queue.put(("log", f"Live mode: Found {len(shots_to_convert)} shot(s) needing conversion. Starting..."))
+                threading.Thread(
+                    target=self._convert_worker,
+                    args=(shots_to_convert, self.oiiotool),
+                    daemon=True,
+                ).start()
+
+        # --- Auto Move Logic ---
+        now = time.time()
+        shots_ready_to_move = []
+        
+        for shot in shots:
+            # Only consider shots that are otherwise ready
+            if shot.is_moved or shot.needs_conversion or shot.dropbox_status != "Complete":
+                continue
+
+            try:
+                frame_files = sorted([os.path.join(shot.path, f) for f in os.listdir(shot.path) if f.lower().endswith(".exr")])
+                if len(frame_files) < 2: # Need at least 2 frames to calculate a delta
+                    continue
+
+                # Calculate average time delta between frames
+                timestamps = [os.path.getmtime(f) for f in frame_files]
+                deltas = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
+                avg_delta = sum(deltas) / len(deltas) if deltas else 0
+
+                # Determine the required delay
+                adaptive_delay = avg_delta * self.frame_time_multiplier.get()
+                required_delay = max(self.min_delay.get(), adaptive_delay)
+                
+                time_since_last_frame = now - timestamps[-1]
+
+                if time_since_last_frame > required_delay:
+                    shots_ready_to_move.append(shot)
+                    self.queue.put(("log", f"Shot {shot.name} appears complete. (Idle for {time_since_last_frame:.0f}s > {required_delay:.0f}s)"))
+
+            except (FileNotFoundError, ValueError, IndexError):
+                continue # Folder might be empty or files disappeared
+
+        if shots_ready_to_move:
+            self.queue.put(("log", f"Live mode: Found {len(shots_ready_to_move)} completed shot(s). Moving..."))
+            self._move_multiple_worker(shots_ready_to_move)
 
     def move_selected_to_comp(self) -> None:
         """Move all selected and eligible shots to the 'Ready for Comp' folder."""
@@ -1061,7 +1157,10 @@ class ConverterGUI(tk.Tk):
                     self.scanning = False
                     self.load_folder_btn.config(state=tk.NORMAL)
                     self.refresh_btn.config(state=tk.NORMAL)
-                    self._update_shot_list(msg[1])
+                    shots = msg[1]
+                    self._update_shot_list(shots)
+                    if self.live_mode_active.get():
+                        self._handle_auto_processing(shots)
                 elif msg[0] == "shot":
                     _, name, done, total = msg
                     self.shot_label.config(text=f"{name}: {done}/{total}")
