@@ -179,14 +179,19 @@ def scan_shots(root: str, ready_for_comp_path: str) -> List[Shot]:
         needs_conversion = frames > sbs_frames
         conversion_progress = sbs_frames / frames if frames > 0 else 0.0
         
-        dropbox_status = shot_status.get("dropbox_status", "Not Started")
-        dropbox_progress = shot_status.get("dropbox_progress", 0.0)
-
-        if conversion_progress == 1.0 and dropbox_status != "Complete":
-            shot_status["dropbox_status"] = "Complete"
-            shot_status["dropbox_progress"] = 1.0
+        # --- Dropbox Status ---
+        # This is based on the local SBS folder, assuming Dropbox client is syncing it.
+        dropbox_progress = conversion_progress
+        if dropbox_progress >= 1.0:
             dropbox_status = "Complete"
             dropbox_progress = 1.0
+        elif dropbox_progress > 0:
+            dropbox_status = "In Progress"
+        else:
+            dropbox_status = "Not Started"
+        
+        shot_status['dropbox_status'] = dropbox_status
+        shot_status['dropbox_progress'] = dropbox_progress
 
         shots_map[shot_name] = Shot(
             name=shot_name,
@@ -435,6 +440,7 @@ class ConverterGUI(tk.Tk):
             shot_frame.pack(fill=tk.X, pady=2, padx=5)
             # Configure the grid columns. Column 1 should expand.
             shot_frame.columnconfigure(1, weight=1)
+            shot_frame.columnconfigure(2, minsize=120) # Give status column a fixed width
 
             cb = ttk.Checkbutton(shot_frame, variable=var)
             cb.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -468,7 +474,7 @@ class ConverterGUI(tk.Tk):
                 progress_text = f"{shot.sbs_frames}/{shot.sbs_frames}"
                 style = "blue.TLabel" if shot.is_moved else "black.TLabel"
             else:
-                progress_text = f"{int(shot.dropbox_progress * shot.sbs_frames)}/{shot.sbs_frames}"
+                progress_text = f"{int(shot.dropbox_progress * shot.frames)}/{shot.frames}"
                 style = "black.TLabel"
             
             status_label = ttk.Label(shot_frame, text=progress_text, style=style)
