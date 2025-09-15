@@ -108,20 +108,19 @@ class Shot:
 
 
 def frame_count(path: str) -> int:
-    try:
-        return len([f for f in os.listdir(path)
-                    if f.lower().endswith(".exr") and "_SBS" not in f])
-    except FileNotFoundError:
+    """Recursively count source EXR files in a directory."""
+    if not os.path.exists(path):
         return 0
+    return sum(1 for _, _, files in os.walk(path)
+               for f in files if f.lower().endswith(".exr") and "_SBS" not in f)
 
 
 def sbs_frame_count(path: str) -> int:
-    """Count SBS EXR files in a directory (including those with _SBS in filename)."""
-    try:
-        return len([f for f in os.listdir(path)
-                    if f.lower().endswith(".exr")])
-    except FileNotFoundError:
+    """Recursively count SBS EXR files in a directory."""
+    if not os.path.exists(path):
         return 0
+    return sum(1 for _, _, files in os.walk(path)
+               for f in files if f.lower().endswith(".exr"))
 
 
 def load_shot_statuses(root: str) -> Dict[str, dict]:
@@ -722,17 +721,20 @@ class ConverterGUI(tk.Tk):
         max_workers = self.max_workers.get()
         semaphore = threading.Semaphore(max_workers)
 
-        def process(shot: Shot, frame: str, outdir: str) -> tuple[str, str, int, str]:
+        def process(shot: Shot, frame_rel_path: str, outdir: str) -> tuple[str, str, int, str]:
             """Process a single frame, respecting the semaphore."""
             with semaphore:
-                src = os.path.join(shot.path, frame)
-                dst = os.path.join(outdir, frame.replace(".exr", "_SBS.exr"))
+                src = os.path.join(shot.path, frame_rel_path)
+                dst = os.path.join(outdir, frame_rel_path.replace(".exr", "_SBS.exr"))
                 
+                # Ensure the destination directory exists
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+
                 try:
-                    with tempfile.NamedTemporaryFile(suffix=".exr", dir=outdir, delete=False) as tmp:
+                    with tempfile.NamedTemporaryFile(suffix=".exr", dir=os.path.dirname(dst), delete=False) as tmp:
                         temp_dst = tmp.name
                 except Exception as e:
-                    return shot.name, frame, -1, f"Failed to create temp file: {e}"
+                    return shot.name, frame_rel_path, -1, f"Failed to create temp file: {e}"
 
                 cmd = [
                     oiiotool,
@@ -752,12 +754,12 @@ class ConverterGUI(tk.Tk):
                     )
                     
                     if result.returncode != 0:
-                        return shot.name, frame, result.returncode, result.stderr.strip()
+                        return shot.name, frame_rel_path, result.returncode, result.stderr.strip()
                     else:
                         os.rename(temp_dst, dst)
-                        return shot.name, frame, 0, ""
+                        return shot.name, frame_rel_path, 0, ""
                 except Exception as e:
-                    return shot.name, frame, -1, str(e)
+                    return shot.name, frame_rel_path, -1, str(e)
                 finally:
                     if os.path.exists(temp_dst):
                         try:
@@ -784,12 +786,12 @@ class ConverterGUI(tk.Tk):
             shot_progress = {shot.name: {"done": 0, "total": len(self._frame_list(shot.path))} for shot in shots}
 
             for future in as_completed(futures):
-                shot_name, frame, retcode, stderr = future.result()
+                shot_name, frame_rel_path, retcode, stderr = future.result()
                 
                 if retcode != 0:
-                    self.queue.put(("log", f"{shot_name}: {frame} failed - {stderr}"))
+                    self.queue.put(("log", f"{shot_name}: {frame_rel_path} failed - {stderr}"))
                 else:
-                    self.queue.put(("log", f"{shot_name}: {frame} ✅"))
+                    self.queue.put(("log", f"{shot_name}: {frame_rel_path} ✅"))
                 
                 done += 1
                 shot_progress[shot_name]["done"] += 1
@@ -829,22 +831,30 @@ class ConverterGUI(tk.Tk):
         self.queue.put(("refresh_request",))
 
     def _frame_list(self, path: str) -> List[str]:
-        """Get list of frames that need conversion (skip already converted ones)."""
-        source_frames = [f for f in sorted(os.listdir(path))
-                        if f.lower().endswith(".exr") and "_SBS" not in f]
+        """Get list of relative paths for frames that need conversion."""
+        source_frames = []
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.lower().endswith(".exr") and "_SBS" not in f:
+                    # Create a relative path from the base 'path'
+                    relative_path = os.path.relpath(os.path.join(root, f), path)
+                    source_frames.append(relative_path)
         
-        # Check which ones are already converted
+        source_frames.sort()
+
         sbs_path = f"{path}_SBS"
-        if os.path.exists(sbs_path):
-            try:
-                existing_sbs = set(os.listdir(sbs_path))
-                # Filter out frames that already have SBS versions
-                source_frames = [f for f in source_frames 
-                                if f.replace(".exr", "_SBS.exr") not in existing_sbs]
-            except (OSError, FileNotFoundError):
-                pass  # If we can't read the SBS directory, convert all frames
+        if not os.path.exists(sbs_path):
+            return source_frames
+
+        # Filter out frames that are already converted
+        unconverted_frames = []
+        for frame_rel_path in source_frames:
+            # Construct the expected output path
+            sbs_file_path = os.path.join(sbs_path, frame_rel_path.replace(".exr", "_SBS.exr"))
+            if not os.path.exists(sbs_file_path):
+                unconverted_frames.append(frame_rel_path)
         
-        return source_frames
+        return unconverted_frames
 
     def _frame_count(self, path: str) -> int:
         return len(self._frame_list(path))
@@ -910,16 +920,22 @@ class ConverterGUI(tk.Tk):
             # Even if there are no frames to convert, we might have a preview
             source_frames = []
             try:
-                source_frames = [f for f in sorted(os.listdir(shot.path))
-                                 if f.lower().endswith(".exr") and "_SBS" not in f]
+                # Find the first EXR file recursively for preview
+                for root, _, files in os.walk(shot.path):
+                    for f in files:
+                        if f.lower().endswith(".exr") and "_SBS" not in f:
+                            source_frames.append(os.path.join(root, f))
+                            break  # Found one, that's enough
+                    if source_frames:
+                        break
             except FileNotFoundError:
                 pass # Ignore if folder doesn't exist
             if not source_frames:
                 self.queue.put(("preview_update", None, [], shot, ""))
                 return
-            frames = source_frames
-
-        frame_path = os.path.join(shot.path, frames[0])
+            frame_path = source_frames[0]
+        else:
+            frame_path = os.path.join(shot.path, frames[0])
         thumbnail = self._make_thumbnail(frame_path)
         channels = self._get_channels(frame_path)
         
